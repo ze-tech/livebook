@@ -13,18 +13,30 @@ defmodule Livebook.Notebook do
   # A notebook is divided into a number of *sections*, each
   # containing a number of *cells*.
 
-  defstruct [:name, :version, :sections, :metadata]
+  defstruct [
+    :name,
+    :version,
+    :setup_section,
+    :sections,
+    :leading_comments,
+    :persist_outputs,
+    :autosave_interval_s,
+    :output_counter
+  ]
 
   alias Livebook.Notebook.{Section, Cell}
+  alias Livebook.Utils.Graph
   import Livebook.Utils, only: [access_by_id: 1]
-
-  @type metadata :: %{String.t() => term()}
 
   @type t :: %__MODULE__{
           name: String.t(),
           version: String.t(),
+          setup_section: Section.t(),
           sections: list(Section.t()),
-          metadata: metadata()
+          leading_comments: list(list(line :: String.t())),
+          persist_outputs: boolean(),
+          autosave_interval_s: non_neg_integer() | nil,
+          output_counter: non_neg_integer()
         }
 
   @version "1.0"
@@ -37,9 +49,54 @@ defmodule Livebook.Notebook do
     %__MODULE__{
       name: "Untitled notebook",
       version: @version,
+      setup_section: %{Section.new() | id: "setup-section", name: "Setup", cells: []},
       sections: [],
-      metadata: %{}
+      leading_comments: [],
+      persist_outputs: default_persist_outputs(),
+      autosave_interval_s: default_autosave_interval_s(),
+      output_counter: 0
     }
+    |> put_setup_cell(Cell.new(:code))
+  end
+
+  @doc """
+  Sets the given cell as the setup cell.
+  """
+  @spec put_setup_cell(t(), Cell.Code.t()) :: t()
+  def put_setup_cell(notebook, %Cell.Code{} = cell) do
+    put_in(notebook.setup_section.cells, [%{cell | id: Cell.setup_cell_id()}])
+  end
+
+  @doc """
+  Returns the default value of `persist_outputs`.
+  """
+  @spec default_persist_outputs() :: boolean()
+  def default_persist_outputs(), do: false
+
+  @doc """
+  Returns the default value of `autosave_interval_s`.
+  """
+  @spec default_autosave_interval_s() :: non_neg_integer()
+  def default_autosave_interval_s(), do: 5
+
+  @doc """
+  Sets all persistence related properties to their default values.
+  """
+  @spec reset_persistence_options(t()) :: t()
+  def reset_persistence_options(notebook) do
+    %{
+      notebook
+      | persist_outputs: default_persist_outputs(),
+        autosave_interval_s: default_autosave_interval_s()
+    }
+  end
+
+  @doc """
+  Returns all notebook sections, including the implicit ones.
+  """
+  @spec all_sections(t()) :: list(Section.t())
+  def all_sections(notebook) do
+    get_in(notebook, [access_all_sections()])
   end
 
   @doc """
@@ -47,7 +104,9 @@ defmodule Livebook.Notebook do
   """
   @spec fetch_section(t(), Section.id()) :: {:ok, Section.t()} | :error
   def fetch_section(notebook, section_id) do
-    Enum.find_value(notebook.sections, :error, fn section ->
+    notebook
+    |> all_sections()
+    |> Enum.find_value(:error, fn section ->
       section.id == section_id && {:ok, section}
     end)
   end
@@ -58,7 +117,7 @@ defmodule Livebook.Notebook do
   @spec fetch_cell_and_section(t(), Cell.id()) :: {:ok, Cell.t(), Section.t()} | :error
   def fetch_cell_and_section(notebook, cell_id) do
     for(
-      section <- notebook.sections,
+      section <- all_sections(notebook),
       cell <- section.cells,
       cell.id == cell_id,
       do: {cell, section}
@@ -169,9 +228,36 @@ defmodule Livebook.Notebook do
   def update_cell(notebook, cell_id, fun) do
     update_in(
       notebook,
-      [Access.key(:sections), Access.all(), Access.key(:cells), access_by_id(cell_id)],
+      [access_all_sections(), Access.all(), Access.key(:cells), access_by_id(cell_id)],
       fun
     )
+  end
+
+  @doc """
+  Updates all cells with the given function.
+  """
+  @spec update_cells(t(), (Cell.t() -> Cell.t())) :: t()
+  def update_cells(notebook, fun) do
+    update_in(
+      notebook,
+      [access_all_sections(), Access.all(), Access.key(:cells), Access.all()],
+      fun
+    )
+  end
+
+  @doc """
+  Updates cells as `update_cells/2`, but carries an accumulator.
+  """
+  @spec update_reduce_cells(t(), acc, (Cell.t(), acc -> {Cell.t(), acc})) :: {t(), acc}
+        when acc: term()
+  def update_reduce_cells(notebook, acc, fun) do
+    {[setup_section | sections], acc} =
+      Enum.map_reduce([notebook.setup_section | notebook.sections], acc, fn section, acc ->
+        {cells, acc} = Enum.map_reduce(section.cells, acc, fun)
+        {%{section | cells: cells}, acc}
+      end)
+
+    {%{notebook | setup_section: setup_section, sections: sections}, acc}
   end
 
   @doc """
@@ -179,7 +265,21 @@ defmodule Livebook.Notebook do
   """
   @spec update_section(t(), Section.id(), (Section.t() -> Section.t())) :: t()
   def update_section(notebook, section_id, fun) do
-    update_in(notebook, [Access.key(:sections), access_by_id(section_id)], fun)
+    update_in(notebook, [access_all_sections(), access_by_id(section_id)], fun)
+  end
+
+  defp access_all_sections() do
+    fn
+      :get, %__MODULE__{} = notebook, next ->
+        next.([notebook.setup_section | notebook.sections])
+
+      :get_and_update, %__MODULE__{} = notebook, next ->
+        {gets, [setup_section | sections]} = next.([notebook.setup_section | notebook.sections])
+        {gets, %{notebook | setup_section: setup_section, sections: sections}}
+
+      _op, data, _next ->
+        raise "access_all_sections/0 expected %Livebook.Notebook{}, got: #{inspect(data)}"
+    end
   end
 
   @doc """
@@ -249,6 +349,46 @@ defmodule Livebook.Notebook do
   end
 
   @doc """
+  Checks if `section` can be moved by `offset`.
+
+  Specifically, this function checks if after the move
+  all child sections are still below their parent sections.
+  """
+  @spec can_move_section_by?(t(), Section.t(), integer()) :: boolean()
+  def can_move_section_by?(notebook, section, offset)
+
+  def can_move_section_by?(notebook, %{parent_id: nil} = section, offset) do
+    notebook.sections
+    |> Enum.with_index()
+    |> Enum.filter(fn {that_section, _idx} -> that_section.parent_id == section.id end)
+    |> Enum.map(fn {_section, idx} -> idx end)
+    |> case do
+      [] ->
+        true
+
+      child_indices ->
+        section_idx = section_index(notebook, section.id)
+        section_idx + offset < Enum.min(child_indices)
+    end
+  end
+
+  def can_move_section_by?(notebook, section, offset) do
+    parent_idx = section_index(notebook, section.parent_id)
+    section_idx = section_index(notebook, section.id)
+    parent_idx < section_idx + offset
+  end
+
+  @doc """
+  Returns sections that are valid parents for the given section.
+  """
+  @spec valid_parents_for(t(), Section.id()) :: list(Section.t())
+  def valid_parents_for(notebook, section_id) do
+    notebook.sections
+    |> Enum.take_while(&(&1.id != section_id))
+    |> Enum.filter(&(&1.parent_id == nil))
+  end
+
+  @doc """
   Moves section by the given offset.
   """
   @spec move_section(t(), Section.id(), integer()) :: t()
@@ -257,11 +397,7 @@ defmodule Livebook.Notebook do
     # Then we find its' new index from given offset.
     # Finally, we move the section, and return the new notebook.
 
-    idx =
-      Enum.find_index(notebook.sections, fn
-        section -> section.id == section_id
-      end)
-
+    idx = section_index(notebook, section_id)
     new_idx = (idx + offset) |> clamp_index(notebook.sections)
 
     {section, sections} = List.pop_at(notebook.sections, idx)
@@ -275,19 +411,20 @@ defmodule Livebook.Notebook do
   """
   @spec cells_with_section(t()) :: list({Cell.t(), Section.t()})
   def cells_with_section(notebook) do
-    for section <- notebook.sections,
+    for section <- all_sections(notebook),
         cell <- section.cells,
         do: {cell, section}
   end
 
   @doc """
-  Returns a list of `{cell, section}` pairs including all Elixir cells in order.
+  Returns a list of `{cell, section}` pairs including all evaluable
+  cells in order.
   """
-  @spec elixir_cells_with_section(t()) :: list({Cell.t(), Section.t()})
-  def elixir_cells_with_section(notebook) do
+  @spec evaluable_cells_with_section(t()) :: list({Cell.t(), Section.t()})
+  def evaluable_cells_with_section(notebook) do
     notebook
     |> cells_with_section()
-    |> Enum.filter(fn {cell, _section} -> is_struct(cell, Cell.Elixir) end)
+    |> Enum.filter(fn {cell, _section} -> Cell.evaluable?(cell) end)
   end
 
   @doc """
@@ -298,9 +435,17 @@ defmodule Livebook.Notebook do
   """
   @spec parent_cells_with_section(t(), Cell.id()) :: list({Cell.t(), Section.t()})
   def parent_cells_with_section(notebook, cell_id) do
+    parent_cell_ids =
+      notebook
+      |> cell_dependency_graph()
+      |> Graph.find_path(cell_id, nil)
+      |> MapSet.new()
+      |> MapSet.delete(cell_id)
+      |> MapSet.delete(nil)
+
     notebook
     |> cells_with_section()
-    |> Enum.take_while(fn {cell, _} -> cell.id != cell_id end)
+    |> Enum.filter(fn {cell, _} -> MapSet.member?(parent_cell_ids, cell.id) end)
     |> Enum.reverse()
   end
 
@@ -312,32 +457,105 @@ defmodule Livebook.Notebook do
   """
   @spec child_cells_with_section(t(), Cell.id()) :: list({Cell.t(), Section.t()})
   def child_cells_with_section(notebook, cell_id) do
+    graph = cell_dependency_graph(notebook)
+
+    child_cell_ids =
+      graph
+      |> Graph.leaves()
+      |> Enum.flat_map(&Graph.find_path(graph, &1, cell_id))
+      |> MapSet.new()
+      |> MapSet.delete(cell_id)
+
     notebook
     |> cells_with_section()
-    |> Enum.drop_while(fn {cell, _} -> cell.id != cell_id end)
-    |> Enum.drop(1)
+    |> Enum.filter(fn {cell, _} -> MapSet.member?(child_cell_ids, cell.id) end)
   end
 
   @doc """
-  Finds an input cell available to the given cell and matching
-  the given prompt.
-  """
-  @spec input_cell_for_prompt(t(), Cell.id(), String.t()) :: {:ok, Cell.Input.t()} | :error
-  def input_cell_for_prompt(notebook, cell_id, prompt) do
-    notebook
-    |> parent_cells_with_section(cell_id)
-    |> Enum.map(fn {cell, _} -> cell end)
-    |> Enum.filter(fn cell ->
-      is_struct(cell, Cell.Input) and String.starts_with?(prompt, cell.name)
-    end)
-    |> case do
-      [] ->
-        :error
+  Returns the list with the given parent cells and all of
+  their child cells.
 
-      input_cells ->
-        cell = Enum.max_by(input_cells, &String.length(&1.name))
-        {:ok, cell}
-    end
+  The cells are not ordered in any secific way.
+  """
+  @spec cell_ids_with_children(t(), list(Cell.id())) :: list(Cell.id())
+  def cell_ids_with_children(notebook, parent_cell_ids) do
+    graph = cell_dependency_graph(notebook)
+
+    for parent_id <- parent_cell_ids,
+        leaf_id <- Graph.leaves(graph),
+        cell_id <- Graph.find_path(graph, leaf_id, parent_id),
+        uniq: true,
+        do: cell_id
+  end
+
+  @doc """
+  Computes cell dependency graph.
+
+  Every cell has one or none parent cells, so the graph
+  is represented as a map, with cell id as the key and
+  its parent cell id as the value. Cells with no parent
+  are also included with the value of `nil`.
+
+  ## Options
+
+    * `:cell_filter` - a function determining if the given
+      cell should be included in the graph. If a cell is
+      excluded, transitive parenthood still applies.
+      By default all cells are included.
+  """
+  @spec cell_dependency_graph(t()) :: Graph.t(Cell.id())
+  def cell_dependency_graph(notebook, opts \\ []) do
+    notebook
+    |> all_sections()
+    |> Enum.reduce(
+      {%{}, nil, %{}},
+      fn section, {graph, prev_regular_section, last_id_by_section} ->
+        prev_section_id =
+          if section.parent_id,
+            do: section.parent_id,
+            else: prev_regular_section && prev_regular_section.id
+
+        # Cell that this section directly depends on,
+        # if the section it's empty it's last id of the previous section
+        prev_cell_id = prev_section_id && last_id_by_section[prev_section_id]
+
+        {graph, last_cell_id} =
+          if filter = opts[:cell_filter] do
+            Enum.filter(section.cells, filter)
+          else
+            section.cells
+          end
+          |> Enum.map(& &1.id)
+          |> Enum.reduce({graph, prev_cell_id}, fn cell_id, {graph, prev_cell_id} ->
+            {put_in(graph[cell_id], prev_cell_id), cell_id}
+          end)
+
+        last_id_by_section = put_in(last_id_by_section[section.id], last_cell_id)
+
+        {
+          graph,
+          if(section.parent_id, do: prev_regular_section, else: section),
+          last_id_by_section
+        }
+      end
+    )
+    |> elem(0)
+  end
+
+  @doc """
+  Returns index of the given section or `nil` if not found.
+  """
+  @spec section_index(t(), Section.id()) :: non_neg_integer() | nil
+  def section_index(notebook, section_id) do
+    Enum.find_index(notebook.sections, &(&1.id == section_id))
+  end
+
+  @doc """
+  Returns a list of sections branching from the given one.
+  """
+  @spec child_sections(t(), Section.id()) :: list(Section.t())
+  def child_sections(notebook, section_id) do
+    Enum.filter(notebook.sections, &(&1.parent_id == section_id))
   end
 
   @doc """
@@ -346,5 +564,208 @@ defmodule Livebook.Notebook do
   @spec forked(t()) :: t()
   def forked(notebook) do
     %{notebook | name: notebook.name <> " - fork"}
+  end
+
+  @doc """
+  Traverses cell outputs to find asset info matching
+  the given hash.
+  """
+  @spec find_asset_info(t(), String.t()) :: (asset_info :: map()) | nil
+  def find_asset_info(notebook, hash) do
+    notebook
+    |> all_sections()
+    |> Enum.find_value(fn section ->
+      Enum.find_value(section.cells, fn
+        %Cell.Smart{js_view: %{assets: %{hash: ^hash} = assets_info}} ->
+          assets_info
+
+        %{outputs: outputs} ->
+          find_assets_info_in_outputs(outputs, hash)
+
+        _cell ->
+          nil
+      end)
+    end)
+  end
+
+  defp find_assets_info_in_outputs(outputs, hash) do
+    Enum.find_value(outputs, fn
+      {_idx, {:js, %{js_view: %{assets: %{hash: ^hash} = assets_info}}}} -> assets_info
+      {_idx, {:frame, outputs, _}} -> find_assets_info_in_outputs(outputs, hash)
+      _ -> nil
+    end)
+  end
+
+  @doc """
+  Adds new output to the given cell.
+
+  Automatically merges stdout outputs and updates frames.
+  """
+  @spec add_cell_output(t(), Cell.id(), Livebook.Runtime.output()) :: t()
+  def add_cell_output(notebook, cell_id, output) do
+    {notebook, counter} = do_add_cell_output(notebook, cell_id, notebook.output_counter, output)
+    %{notebook | output_counter: counter}
+  end
+
+  defp do_add_cell_output(notebook, _cell_id, counter, {:frame, _outputs, %{type: type}} = frame)
+       when type != :default do
+    update_reduce_cells(notebook, counter, fn
+      %{outputs: _} = cell, counter ->
+        {outputs, counter} = update_frames(cell.outputs, counter, frame)
+        {%{cell | outputs: outputs}, counter}
+
+      cell, counter ->
+        {cell, counter}
+    end)
+  end
+
+  defp do_add_cell_output(notebook, cell_id, counter, output) do
+    {output, counter} = index_output(output, counter)
+
+    notebook =
+      update_cell(notebook, cell_id, fn cell ->
+        %{cell | outputs: add_output(cell.outputs, output)}
+      end)
+
+    {notebook, counter}
+  end
+
+  defp update_frames(outputs, counter, {:frame, new_outputs, %{ref: ref, type: type}} = frame) do
+    Enum.map_reduce(outputs, counter, fn
+      {idx, {:frame, outputs, %{ref: ^ref} = info}}, counter ->
+        {new_outputs, counter} = index_outputs(new_outputs, counter)
+        output = {idx, {:frame, apply_frame_update(outputs, new_outputs, type), info}}
+        {output, counter}
+
+      {idx, {:frame, outputs, info}}, counter ->
+        {outputs, counter} = update_frames(outputs, counter, frame)
+        output = {idx, {:frame, outputs, info}}
+        {output, counter}
+
+      output, counter ->
+        {output, counter}
+    end)
+  end
+
+  defp apply_frame_update(_outputs, new_outputs, :replace), do: new_outputs
+  defp apply_frame_update(outputs, new_outputs, :append), do: new_outputs ++ outputs
+
+  defp add_output([], {idx, {:stdout, text}}),
+    do: [{idx, {:stdout, normalize_stdout(text)}}]
+
+  defp add_output([], output), do: [output]
+
+  defp add_output(outputs, {_idx, :ignored}), do: outputs
+
+  # Session clients prune stdout content and handle subsequent
+  # ones by directly appending page content to the previous one
+  defp add_output([{_idx1, {:stdout, :__pruned__}} | _] = outputs, {_idx2, {:stdout, _text}}) do
+    outputs
+  end
+
+  # Session server keeps all outputs, so we merge consecutive stdouts
+  defp add_output([{idx, {:stdout, text}} | tail], {_idx, {:stdout, cont}}) do
+    [{idx, {:stdout, normalize_stdout(text <> cont)}} | tail]
+  end
+
+  defp add_output(outputs, output), do: [output | outputs]
+
+  @doc """
+  Normalizes a text chunk coming form the standard output.
+
+  Handles CR rawinds and caps output lines.
+  """
+  @spec normalize_stdout(String.t()) :: String.t()
+  def normalize_stdout(text) do
+    text
+    |> Livebook.Utils.apply_rewind()
+    |> Livebook.Utils.cap_lines(max_stdout_lines())
+  end
+
+  @doc """
+  The maximum desired number of lines of the standard output.
+  """
+  def max_stdout_lines(), do: 1_000
+
+  @doc """
+  Recursively adds index to all outputs, including frames.
+  """
+  @spec index_outputs(list(Livebook.Runtime.output()), non_neg_integer()) ::
+          {list(Cell.index_output()), non_neg_integer()}
+  def index_outputs(outputs, counter) do
+    Enum.map_reduce(outputs, counter, &index_output/2)
+  end
+
+  defp index_output({:frame, outputs, info}, counter) do
+    {outputs, counter} = index_outputs(outputs, counter)
+    {{counter, {:frame, outputs, info}}, counter + 1}
+  end
+
+  defp index_output(output, counter) do
+    {{counter, output}, counter + 1}
+  end
+
+  @doc """
+  Finds frame outputs matching the given ref.
+  """
+  @spec find_frame_outputs(t(), String.t()) :: list(Cell.indexed_output())
+  def find_frame_outputs(notebook, frame_ref) do
+    for section <- all_sections(notebook),
+        %{outputs: outputs} <- section.cells,
+        output <- outputs,
+        frame_output <- do_find_frame_outputs(output, frame_ref),
+        do: frame_output
+  end
+
+  defp do_find_frame_outputs({_idx, {:frame, _outputs, %{ref: ref}}} = output, ref) do
+    [output]
+  end
+
+  defp do_find_frame_outputs({_idx, {:frame, outputs, _info}}, ref) do
+    Enum.flat_map(outputs, &do_find_frame_outputs(&1, ref))
+  end
+
+  defp do_find_frame_outputs(_output, _ref) do
+    []
+  end
+
+  @doc """
+  Removes outputs that get rendered only once.
+  """
+  @spec prune_cell_outputs(t()) :: t()
+  def prune_cell_outputs(notebook) do
+    update_cells(notebook, fn
+      %{outputs: _outputs} = cell -> %{cell | outputs: prune_outputs(cell.outputs)}
+      cell -> cell
+    end)
+  end
+
+  defp prune_outputs(outputs) do
+    outputs
+    |> Enum.reverse()
+    |> do_prune_outputs([])
+  end
+
+  defp do_prune_outputs([], acc), do: acc
+
+  # Keep the last stdout, so that we know to message it directly, but remove its contents
+  defp do_prune_outputs([{idx, {:stdout, _}}], acc) do
+    [{idx, {:stdout, :__pruned__}} | acc]
+  end
+
+  # Keep frame and its relevant contents
+  defp do_prune_outputs([{idx, {:frame, frame_outputs, info}} | outputs], acc) do
+    do_prune_outputs(outputs, [{idx, {:frame, prune_outputs(frame_outputs), info}} | acc])
+  end
+
+  # Keep outputs that get re-rendered
+  defp do_prune_outputs([{idx, output} | outputs], acc)
+       when elem(output, 0) in [:input, :control, :error] do
+    do_prune_outputs(outputs, [{idx, output} | acc])
+  end
+
+  # Remove everything else
+  defp do_prune_outputs([_output | outputs], acc) do
+    do_prune_outputs(outputs, acc)
   end
 end

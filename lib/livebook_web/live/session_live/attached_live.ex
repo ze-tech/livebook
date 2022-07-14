@@ -4,10 +4,19 @@ defmodule LivebookWeb.SessionLive.AttachedLive do
   alias Livebook.{Session, Runtime, Utils}
 
   @impl true
-  def mount(_params, %{"session_id" => session_id, "current_runtime" => current_runtime}, socket) do
+  def mount(_params, %{"session" => session, "current_runtime" => current_runtime}, socket) do
+    unless Livebook.Config.runtime_enabled?(Livebook.Runtime.Attached) do
+      raise "runtime module not allowed"
+    end
+
+    if connected?(socket) do
+      Session.subscribe(session.id)
+    end
+
     {:ok,
      assign(socket,
-       session_id: session_id,
+       session: session,
+       current_runtime: current_runtime,
        error_message: nil,
        data: initial_data(current_runtime)
      )}
@@ -15,7 +24,7 @@ defmodule LivebookWeb.SessionLive.AttachedLive do
 
   @impl true
   def render(assigns) do
-    ~L"""
+    ~H"""
     <div class="flex-col space-y-5">
       <%= if @error_message do %>
         <div class="error-box">
@@ -39,7 +48,11 @@ defmodule LivebookWeb.SessionLive.AttachedLive do
       <p class="text-gray-700">
         Then enter the connection information below:
       </p>
-      <%= f = form_for :data, "#", phx_submit: "init", phx_change: "validate", autocomplete: "off", spellcheck: "false" %>
+      <.form let={f} for={:data}
+        phx-submit="init"
+        phx-change="validate"
+        autocomplete="off"
+        spellcheck="false">
         <div class="flex flex-col space-y-4">
           <div>
             <div class="input-label">Name</div>
@@ -50,11 +63,21 @@ defmodule LivebookWeb.SessionLive.AttachedLive do
             <%= text_input f, :cookie, value: @data["cookie"], class: "input", placeholder: "mycookie" %>
           </div>
         </div>
-        <%= submit "Connect", class: "mt-5 button button-blue", disabled: not data_valid?(@data) %>
-      </form>
+        <button class="mt-5 button-base button-blue"
+          type="submit"
+          disabled={not data_valid?(@data)}>
+          <%= if(matching_runtime?(@current_runtime, @data), do: "Reconnect", else: "Connect") %>
+        </button>
+      </.form>
     </div>
     """
   end
+
+  defp matching_runtime?(%Runtime.Attached{} = runtime, data) do
+    initial_data(runtime) == data
+  end
+
+  defp matching_runtime?(_runtime, _data), do: false
 
   @impl true
   def handle_event("validate", %{"data" => data}, socket) do
@@ -65,16 +88,28 @@ defmodule LivebookWeb.SessionLive.AttachedLive do
     node = Utils.node_from_name(data["name"])
     cookie = String.to_atom(data["cookie"])
 
-    case Runtime.Attached.init(node, cookie) do
-      {:ok, runtime} ->
-        Session.connect_runtime(socket.assigns.session_id, runtime)
-        {:noreply, assign(socket, data: data, error_message: nil)}
+    runtime = Runtime.Attached.new(node, cookie)
 
-      {:error, error} ->
-        message = runtime_error_to_message(error)
-        {:noreply, assign(socket, data: data, error_message: message)}
+    case Runtime.connect(runtime) do
+      {:ok, runtime} ->
+        Session.set_runtime(socket.assigns.session.pid, runtime)
+        {:noreply, assign(socket, data: initial_data(runtime), error_message: nil)}
+
+      {:error, message} ->
+        {:noreply,
+         assign(socket,
+           data: data,
+           error_message: Livebook.Utils.upcase_first(message)
+         )}
     end
   end
+
+  @impl true
+  def handle_info({:operation, {:set_runtime, _pid, runtime}}, socket) do
+    {:noreply, assign(socket, current_runtime: runtime)}
+  end
+
+  def handle_info(_message, socket), do: {:noreply, socket}
 
   defp initial_data(%Runtime.Attached{node: node, cookie: cookie}) do
     %{
@@ -92,6 +127,4 @@ defmodule LivebookWeb.SessionLive.AttachedLive do
   defp name_placeholder do
     if longname = Livebook.Config.longname(), do: "test@#{longname}", else: "test"
   end
-
-  defp runtime_error_to_message(:unreachable), do: "Node unreachable"
 end

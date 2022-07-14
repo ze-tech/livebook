@@ -2,25 +2,16 @@ defmodule Livebook.LiveMarkdown.Import do
   alias Livebook.Notebook
   alias Livebook.LiveMarkdown.MarkdownHelpers
 
-  @doc """
-  Converts the given Markdown document into a notebook data structure.
-
-  Returns the notebook structure and a list of informative messages/warnings
-  related to the imported input.
-  """
-  @spec notebook_from_markdown(String.t()) :: {Notebook.t(), list(String.t())}
-  def notebook_from_markdown(markdown) do
-    {_, ast, earmark_messages} = EarmarkParser.as_ast(markdown)
+  def notebook_from_livemd(markdown) do
+    {_, ast, earmark_messages} = MarkdownHelpers.markdown_to_block_ast(markdown)
     earmark_messages = Enum.map(earmark_messages, &earmark_message_to_string/1)
 
     {ast, rewrite_messages} = rewrite_ast(ast)
+    elements = group_elements(ast)
+    {notebook, build_messages} = build_notebook(elements)
+    {notebook, postprocess_messages} = postprocess_notebook(notebook)
 
-    notebook =
-      ast
-      |> group_elements()
-      |> build_notebook()
-
-    {notebook, earmark_messages ++ rewrite_messages}
+    {notebook, earmark_messages ++ rewrite_messages ++ build_messages ++ postprocess_messages}
   end
 
   defp earmark_message_to_string({_severity, line_number, message}) do
@@ -32,7 +23,7 @@ defmodule Livebook.LiveMarkdown.Import do
   defp rewrite_ast(ast) do
     {ast, messages1} = rewrite_multiple_primary_headings(ast)
     {ast, messages2} = move_primary_heading_top(ast)
-    ast = trim_comments(ast)
+    ast = normalize_comments(ast)
 
     {ast, messages1 ++ messages2}
   end
@@ -93,12 +84,12 @@ defmodule Livebook.LiveMarkdown.Import do
     {Enum.reverse(left_rev), Enum.reverse(right_rev)}
   end
 
-  # Trims one-line comments to allow nice pattern matching
-  # on Livebook-specific annotations with no regard to surrounding whitespace.
-  defp trim_comments(ast) do
+  # Normalizes comments to allow nice pattern matching on Livebook-specific
+  # annotations with no regard to surrounding whitespace.
+  defp normalize_comments(ast) do
     Enum.map(ast, fn
-      {:comment, attrs, [line], %{comment: true}} ->
-        {:comment, attrs, [String.trim(line)], %{comment: true}}
+      {:comment, attrs, lines, %{comment: true}} ->
+        {:comment, attrs, MarkdownHelpers.normalize_comment_lines(lines), %{comment: true}}
 
       ast_node ->
         ast_node
@@ -110,11 +101,11 @@ defmodule Livebook.LiveMarkdown.Import do
 
   defp group_elements([], elems), do: elems
 
-  defp group_elements([{"h1", _, content, %{}} | ast], elems) do
+  defp group_elements([{"h1", _, [content], %{}} | ast], elems) do
     group_elements(ast, [{:notebook_name, content} | elems])
   end
 
-  defp group_elements([{"h2", _, content, %{}} | ast], elems) do
+  defp group_elements([{"h2", _, [content], %{}} | ast], elems) do
     group_elements(ast, [{:section_name, content} | elems])
   end
 
@@ -141,6 +132,13 @@ defmodule Livebook.LiveMarkdown.Import do
   end
 
   defp group_elements(
+         [{:comment, _, [~s/livebook:{"break_markdown":true}/], %{comment: true}} | ast],
+         elems
+       ) do
+    group_elements(ast, [{:cell, :markdown, []} | elems])
+  end
+
+  defp group_elements(
          [{:comment, _, ["livebook:" <> json], %{comment: true}} | ast],
          elems
        ) do
@@ -151,7 +149,8 @@ defmodule Livebook.LiveMarkdown.Import do
          [{"pre", _, [{"code", [{"class", "elixir"}], [source], %{}}], %{}} | ast],
          elems
        ) do
-    group_elements(ast, [{:cell, :elixir, source} | elems])
+    {outputs, ast} = take_outputs(ast, [])
+    group_elements(ast, [{:cell, :code, source, outputs} | elems])
   end
 
   defp group_elements([ast_node | ast], [{:cell, :markdown, md_ast} | rest]) do
@@ -169,76 +168,177 @@ defmodule Livebook.LiveMarkdown.Import do
       %{"livebook_object" => "cell_input"} ->
         {:cell, :input, data}
 
+      %{"livebook_object" => "smart_cell"} ->
+        {:cell, :smart, data}
+
       _ ->
         {:metadata, data}
     end
   end
 
-  # Builds a notebook from the list of elements obtained in the previous step.
-  # Note that the list of elements is reversed:
-  # first we group elements by traversing Earmark AST top-down
-  # and then aggregate elements into data strictures going bottom-up.
-  defp build_notebook(elems, cells \\ [], sections \\ [])
-
-  defp build_notebook([{:cell, :elixir, source} | elems], cells, sections) do
-    {metadata, elems} = grab_metadata(elems)
-    cell = %{Notebook.Cell.new(:elixir) | source: source, metadata: metadata}
-    build_notebook(elems, [cell | cells], sections)
+  # Import ```output snippets for backward compatibility
+  defp take_outputs(
+         [{"pre", _, [{"code", [{"class", "output"}], [output], %{}}], %{}} | ast],
+         outputs
+       ) do
+    take_outputs(ast, [{:text, output} | outputs])
   end
 
-  defp build_notebook([{:cell, :markdown, md_ast} | elems], cells, sections) do
-    {metadata, elems} = grab_metadata(elems)
-    source = md_ast |> Enum.reverse() |> MarkdownHelpers.markdown_from_ast()
-    cell = %{Notebook.Cell.new(:markdown) | source: source, metadata: metadata}
-    build_notebook(elems, [cell | cells], sections)
+  defp take_outputs(
+         [
+           {:comment, _, [~s/livebook:{"output":true}/], %{comment: true}},
+           {"pre", _, [{"code", [], [output], %{}}], %{}}
+           | ast
+         ],
+         outputs
+       ) do
+    take_outputs(ast, [{:text, output} | outputs])
   end
 
-  defp build_notebook([{:cell, :input, data} | elems], cells, sections) do
-    {metadata, elems} = grab_metadata(elems)
+  # Ignore other exported outputs
+  defp take_outputs(
+         [
+           {:comment, _, [~s/livebook:{"output":true}/], %{comment: true}},
+           {"pre", _, [{"code", [{"class", _info_string}], [_output], %{}}], %{}}
+           | ast
+         ],
+         outputs
+       ) do
+    take_outputs(ast, outputs)
+  end
+
+  defp take_outputs(ast, outputs), do: {outputs, ast}
+
+  # Builds a notebook from the list of elements obtained in the
+  # previous step. The elements are in reversed order, because we
+  # want to aggregate them into data structures going bottom-up.
+  defp build_notebook(elems) do
+    build_notebook(elems, _cells = [], _sections = [], _messages = [], _output_counter = 0)
+  end
+
+  defp build_notebook(
+         [{:cell, :code, source, outputs}, {:cell, :smart, data} | elems],
+         cells,
+         sections,
+         messages,
+         output_counter
+       ) do
+    {outputs, output_counter} = Notebook.index_outputs(outputs, output_counter)
+    %{"kind" => kind, "attrs" => attrs} = data
 
     cell = %{
-      Notebook.Cell.new(:input)
-      | metadata: metadata,
-        type: data["type"] |> String.to_existing_atom(),
-        name: data["name"],
-        value: data["value"],
-        # Optional flags
-        reactive: Map.get(data, "reactive", false)
+      Notebook.Cell.new(:smart)
+      | source: source,
+        outputs: outputs,
+        kind: kind,
+        attrs: attrs
     }
 
-    build_notebook(elems, [cell | cells], sections)
+    build_notebook(elems, [cell | cells], sections, messages, output_counter)
   end
 
-  defp build_notebook([{:section_name, content} | elems], cells, sections) do
-    name = MarkdownHelpers.text_from_ast(content)
+  defp build_notebook(
+         [{:cell, :code, source, outputs} | elems],
+         cells,
+         sections,
+         messages,
+         output_counter
+       ) do
     {metadata, elems} = grab_metadata(elems)
-    section = %{Notebook.Section.new() | name: name, cells: cells, metadata: metadata}
-    build_notebook(elems, [], [section | sections])
+    attrs = cell_metadata_to_attrs(:code, metadata)
+    {outputs, output_counter} = Notebook.index_outputs(outputs, output_counter)
+    cell = %{Notebook.Cell.new(:code) | source: source, outputs: outputs} |> Map.merge(attrs)
+    build_notebook(elems, [cell | cells], sections, messages, output_counter)
   end
 
-  # If there are section-less cells, put them in a default one.
-  defp build_notebook([{:notebook_name, _content} | _] = elems, cells, sections)
-       when cells != [] do
-    section = %{Notebook.Section.new() | cells: cells}
-    build_notebook(elems, [], [section | sections])
+  defp build_notebook(
+         [{:cell, :markdown, md_ast} | elems],
+         cells,
+         sections,
+         messages,
+         output_counter
+       ) do
+    {metadata, elems} = grab_metadata(elems)
+    attrs = cell_metadata_to_attrs(:markdown, metadata)
+    source = md_ast |> Enum.reverse() |> MarkdownHelpers.markdown_from_ast()
+    cell = %{Notebook.Cell.new(:markdown) | source: source} |> Map.merge(attrs)
+    build_notebook(elems, [cell | cells], sections, messages, output_counter)
   end
 
-  # If there are section-less cells, put them in a default one.
-  defp build_notebook([] = elems, cells, sections) when cells != [] do
-    section = %{Notebook.Section.new() | cells: cells}
-    build_notebook(elems, [], [section | sections])
+  defp build_notebook([{:cell, :input, data} | elems], cells, sections, messages, output_counter) do
+    warning =
+      "found an input cell, but those are no longer supported, please use Kino.Input instead"
+
+    warning =
+      if data["reactive"] == true do
+        warning <>
+          ". Also, to make the input reactive you can use an automatically reevaluating cell"
+      else
+        warning
+      end
+
+    build_notebook(elems, cells, sections, messages ++ [warning], output_counter)
   end
 
-  defp build_notebook([{:notebook_name, content} | elems], [], sections) do
-    name = MarkdownHelpers.text_from_ast(content)
-    {metadata, []} = grab_metadata(elems)
-    %{Notebook.new() | name: name, sections: sections, metadata: metadata}
+  defp build_notebook([{:section_name, name} | elems], cells, sections, messages, output_counter) do
+    {metadata, elems} = grab_metadata(elems)
+    attrs = section_metadata_to_attrs(metadata)
+    section = %{Notebook.Section.new() | name: name, cells: cells} |> Map.merge(attrs)
+    build_notebook(elems, [], [section | sections], messages, output_counter)
   end
 
-  # If there's no explicit notebook heading, use the defaults.
-  defp build_notebook([], [], sections) do
-    %{Notebook.new() | sections: sections}
+  defp build_notebook(elems, cells, sections, messages, output_counter) do
+    # At this point we expect the heading, otherwise we use the default
+    {name, elems} =
+      case elems do
+        [{:notebook_name, name} | elems] -> {name, elems}
+        [] -> {nil, []}
+      end
+
+    {metadata, elems} = grab_metadata(elems)
+    # If there are any non-metadata comments we keep them
+    {comments, elems} = grab_leading_comments(elems)
+
+    messages =
+      if elems == [] do
+        messages
+      else
+        messages ++
+          [
+            "found an invalid sequence of comments at the beginning, make sure custom comments are at the very top"
+          ]
+      end
+
+    attrs = notebook_metadata_to_attrs(metadata)
+
+    # We identify a single leading cell as the setup cell, in any
+    # other case all extra cells are put in a default section
+    {setup_cell, extra_sections} =
+      case cells do
+        [] -> {nil, []}
+        [%Notebook.Cell.Code{} = setup_cell] when name != nil -> {setup_cell, []}
+        extra_cells -> {nil, [%{Notebook.Section.new() | cells: extra_cells}]}
+      end
+
+    notebook =
+      %{
+        Notebook.new()
+        | sections: extra_sections ++ sections,
+          leading_comments: comments,
+          output_counter: output_counter
+      }
+      |> maybe_put_name(name)
+      |> maybe_put_setup_cell(setup_cell)
+      |> Map.merge(attrs)
+
+    {notebook, messages}
   end
+
+  defp maybe_put_name(notebook, nil), do: notebook
+  defp maybe_put_name(notebook, name), do: %{notebook | name: name}
+
+  defp maybe_put_setup_cell(notebook, nil), do: notebook
+  defp maybe_put_setup_cell(notebook, cell), do: Notebook.put_setup_cell(notebook, cell)
 
   # Takes optional leading metadata JSON object and returns {metadata, rest}.
   defp grab_metadata([{:metadata, metadata} | elems]) do
@@ -246,4 +346,102 @@ defmodule Livebook.LiveMarkdown.Import do
   end
 
   defp grab_metadata(elems), do: {%{}, elems}
+
+  defp grab_leading_comments([]), do: {[], []}
+
+  # Since these are not metadata comments they get wrapped in a markdown cell,
+  # so we unpack it
+  defp grab_leading_comments([{:cell, :markdown, md_ast}]) do
+    comments = for {:comment, _attrs, lines, %{comment: true}} <- Enum.reverse(md_ast), do: lines
+    {comments, []}
+  end
+
+  defp grab_leading_comments(elems), do: {[], elems}
+
+  defp notebook_metadata_to_attrs(metadata) do
+    Enum.reduce(metadata, %{}, fn
+      {"persist_outputs", persist_outputs}, attrs ->
+        Map.put(attrs, :persist_outputs, persist_outputs)
+
+      {"autosave_interval_s", autosave_interval_s}, attrs ->
+        Map.put(attrs, :autosave_interval_s, autosave_interval_s)
+
+      _entry, attrs ->
+        attrs
+    end)
+  end
+
+  defp section_metadata_to_attrs(metadata) do
+    Enum.reduce(metadata, %{}, fn
+      {"branch_parent_index", parent_idx}, attrs ->
+        # At this point we cannot extract other section id,
+        # so we temporarily keep the index
+        Map.put(attrs, :parent_id, {:idx, parent_idx})
+
+      _entry, attrs ->
+        attrs
+    end)
+  end
+
+  defp cell_metadata_to_attrs(:code, metadata) do
+    Enum.reduce(metadata, %{}, fn
+      {"disable_formatting", disable_formatting}, attrs ->
+        Map.put(attrs, :disable_formatting, disable_formatting)
+
+      {"reevaluate_automatically", reevaluate_automatically}, attrs ->
+        Map.put(attrs, :reevaluate_automatically, reevaluate_automatically)
+
+      _entry, attrs ->
+        attrs
+    end)
+  end
+
+  defp cell_metadata_to_attrs(_type, _metadata) do
+    %{}
+  end
+
+  defp postprocess_notebook(notebook) do
+    {sections, {_branching_ids, warnings}} =
+      notebook.sections
+      |> Enum.with_index()
+      |> Enum.map_reduce({MapSet.new(), []}, fn {section, section_idx},
+                                                {branching_ids, warnings} ->
+        # Set parent_id based on the persisted branch_parent_index if present
+        case section.parent_id do
+          nil ->
+            {section, {branching_ids, warnings}}
+
+          {:idx, parent_idx} ->
+            parent = Enum.at(notebook.sections, parent_idx)
+
+            cond do
+              section_idx <= parent_idx ->
+                {%{section | parent_id: nil},
+                 {
+                   branching_ids,
+                   [
+                     ~s{ignoring the parent section of "#{section.name}", because it comes later in the notebook}
+                     | warnings
+                   ]
+                 }}
+
+              !is_nil(parent) && MapSet.member?(branching_ids, parent.id) ->
+                {%{section | parent_id: nil},
+                 {
+                   branching_ids,
+                   [
+                     ~s{ignoring the parent section of "#{section.name}", because it is itself a branching section}
+                     | warnings
+                   ]
+                 }}
+
+              true ->
+                {%{section | parent_id: parent.id},
+                 {MapSet.put(branching_ids, section.id), warnings}}
+            end
+        end
+      end)
+
+    {%{notebook | sections: sections}, Enum.reverse(warnings)}
+  end
 end

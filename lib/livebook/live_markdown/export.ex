@@ -3,72 +3,213 @@ defmodule Livebook.LiveMarkdown.Export do
   alias Livebook.Notebook.Cell
   alias Livebook.LiveMarkdown.MarkdownHelpers
 
-  @doc """
-  Converts the given notebook into a Markdown document.
-  """
-  @spec notebook_to_markdown(Notebook.t()) :: String.t()
-  def notebook_to_markdown(notebook) do
-    iodata = render_notebook(notebook)
+  def notebook_to_livemd(notebook, opts \\ []) do
+    include_outputs? = Keyword.get(opts, :include_outputs, notebook.persist_outputs)
+
+    js_ref_with_data = if include_outputs?, do: collect_js_output_data(notebook), else: %{}
+
+    ctx = %{include_outputs?: include_outputs?, js_ref_with_data: js_ref_with_data}
+
+    iodata = render_notebook(notebook, ctx)
     # Add trailing newline
     IO.iodata_to_binary([iodata, "\n"])
   end
 
-  defp render_notebook(notebook) do
-    name = "# #{notebook.name}"
-    sections = Enum.map(notebook.sections, &render_section/1)
-
-    [name | sections]
-    |> Enum.intersperse("\n\n")
-    |> prepend_metadata(notebook.metadata)
+  defp collect_js_output_data(notebook) do
+    for section <- notebook.sections,
+        %{outputs: outputs} <- section.cells,
+        {_idx, {:js, %{js_view: %{ref: ref, pid: pid}, export: %{}}}} <- outputs do
+      Task.async(fn ->
+        {ref, get_js_output_data(pid, ref)}
+      end)
+    end
+    |> Task.await_many(:infinity)
+    |> Map.new()
   end
 
-  defp render_section(section) do
-    name = "## #{section.name}"
-    cells = Enum.map(section.cells, &render_cell/1)
+  defp get_js_output_data(pid, ref) do
+    send(pid, {:connect, self(), %{origin: self(), ref: ref}})
+
+    monitor_ref = Process.monitor(pid)
+
+    data =
+      receive do
+        {:connect_reply, data, %{ref: ^ref}} -> data
+        {:DOWN, ^monitor_ref, :process, _pid, _reason} -> nil
+      end
+
+    Process.demonitor(monitor_ref, [:flush])
+
+    data
+  end
+
+  defp render_notebook(notebook, ctx) do
+    %{setup_section: %{cells: [setup_cell]}} = notebook
+
+    comments =
+      Enum.map(notebook.leading_comments, fn
+        [line] -> ["<!-- ", line, " -->"]
+        lines -> ["<!--\n", Enum.intersperse(lines, "\n"), "\n-->"]
+      end)
+
+    name = ["# ", notebook.name]
+    setup_cell = render_setup_cell(setup_cell, ctx)
+    sections = Enum.map(notebook.sections, &render_section(&1, notebook, ctx))
+
+    metadata = notebook_metadata(notebook)
+
+    notebook_with_metadata =
+      [name, setup_cell | sections]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.intersperse("\n\n")
+      |> prepend_metadata(metadata)
+
+    Enum.intersperse(comments ++ [notebook_with_metadata], "\n\n")
+  end
+
+  defp notebook_metadata(notebook) do
+    put_unless_default(
+      %{},
+      Map.take(notebook, [:persist_outputs, :autosave_interval_s]),
+      Map.take(Notebook.new(), [:persist_outputs, :autosave_interval_s])
+    )
+  end
+
+  defp render_section(section, notebook, ctx) do
+    name = ["## ", section.name]
+
+    {cells, _} =
+      Enum.map_reduce(section.cells, nil, fn cell, prev_cell ->
+        separator =
+          if is_struct(cell, Cell.Markdown) and is_struct(prev_cell, Cell.Markdown) do
+            [~s/<!-- livebook:{"break_markdown":true} -->\n\n/]
+          else
+            []
+          end
+
+        rendered = separator ++ [render_cell(cell, ctx)]
+        {rendered, cell}
+      end)
+
+    metadata = section_metadata(section, notebook)
 
     [name | cells]
     |> Enum.intersperse("\n\n")
-    |> prepend_metadata(section.metadata)
+    |> prepend_metadata(metadata)
   end
 
-  defp render_cell(%Cell.Markdown{} = cell) do
+  defp section_metadata(%{parent_id: nil} = _section, _notebook) do
+    %{}
+  end
+
+  defp section_metadata(section, notebook) do
+    parent_idx = Notebook.section_index(notebook, section.parent_id)
+    %{"branch_parent_index" => parent_idx}
+  end
+
+  defp render_setup_cell(%{source: ""}, _ctx), do: nil
+  defp render_setup_cell(cell, ctx), do: render_cell(cell, ctx)
+
+  defp render_cell(%Cell.Markdown{} = cell, _ctx) do
+    metadata = cell_metadata(cell)
+
     cell.source
     |> format_markdown_source()
-    |> prepend_metadata(cell.metadata)
+    |> prepend_metadata(metadata)
   end
 
-  defp render_cell(%Cell.Elixir{} = cell) do
-    code = get_elixir_cell_code(cell)
+  defp render_cell(%Cell.Code{} = cell, ctx) do
+    delimiter = MarkdownHelpers.code_block_delimiter(cell.source)
+    code = get_code_cell_code(cell)
+    outputs = if ctx.include_outputs?, do: render_outputs(cell, ctx), else: []
 
-    """
-    ```elixir
-    #{code}
-    ```\
-    """
-    |> prepend_metadata(cell.metadata)
+    metadata = cell_metadata(cell)
+
+    cell =
+      [delimiter, "elixir\n", code, "\n", delimiter]
+      |> prepend_metadata(metadata)
+
+    if outputs == [] do
+      cell
+    else
+      [cell, "\n\n", outputs]
+    end
   end
 
-  defp render_cell(%Cell.Input{} = cell) do
-    value = if cell.type == :password, do: "", else: cell.value
-
-    json =
-      %{
-        livebook_object: :cell_input,
-        type: cell.type,
-        name: cell.name,
-        value: value
-      }
-      |> put_truthy(reactive: cell.reactive)
-      |> Jason.encode!()
-
-    "<!-- livebook:#{json} -->"
-    |> prepend_metadata(cell.metadata)
+  defp render_cell(%Cell.Smart{} = cell, ctx) do
+    %{Cell.Code.new() | source: cell.source, outputs: cell.outputs}
+    |> render_cell(ctx)
+    |> prepend_metadata(%{
+      "livebook_object" => "smart_cell",
+      "kind" => cell.kind,
+      "attrs" => cell.attrs
+    })
   end
 
-  defp get_elixir_cell_code(%{source: source, metadata: %{"disable_formatting" => true}}),
+  defp cell_metadata(%Cell.Code{} = cell) do
+    put_unless_default(
+      %{},
+      Map.take(cell, [:disable_formatting, :reevaluate_automatically]),
+      Map.take(Cell.Code.new(), [:disable_formatting, :reevaluate_automatically])
+    )
+  end
+
+  defp cell_metadata(_cell), do: %{}
+
+  defp render_outputs(cell, ctx) do
+    cell.outputs
+    |> Enum.reverse()
+    |> Enum.map(fn {_idx, output} -> render_output(output, ctx) end)
+    |> Enum.reject(&(&1 == :ignored))
+    |> Enum.intersperse("\n\n")
+  end
+
+  defp render_output({:stdout, text}, _ctx) do
+    text = String.replace_suffix(text, "\n", "")
+    delimiter = MarkdownHelpers.code_block_delimiter(text)
+    text = strip_ansi(text)
+
+    [delimiter, "\n", text, "\n", delimiter]
+    |> prepend_metadata(%{output: true})
+  end
+
+  defp render_output({:text, text}, _ctx) do
+    delimiter = MarkdownHelpers.code_block_delimiter(text)
+    text = strip_ansi(text)
+
+    [delimiter, "\n", text, "\n", delimiter]
+    |> prepend_metadata(%{output: true})
+  end
+
+  defp render_output(
+         {:js, %{export: %{info_string: info_string, key: key}, js_view: %{ref: ref}}},
+         ctx
+       )
+       when is_binary(info_string) do
+    data = ctx.js_ref_with_data[ref]
+    payload = if key && is_map(data), do: data[key], else: data
+
+    case encode_js_data(payload) do
+      {:ok, binary} ->
+        delimiter = MarkdownHelpers.code_block_delimiter(binary)
+
+        [delimiter, info_string, "\n", binary, "\n", delimiter]
+        |> prepend_metadata(%{output: true})
+
+      _ ->
+        :ignored
+    end
+  end
+
+  defp render_output(_output, _ctx), do: :ignored
+
+  defp encode_js_data(data) when is_binary(data), do: {:ok, data}
+  defp encode_js_data(data), do: Jason.encode(data)
+
+  defp get_code_cell_code(%{source: source, disable_formatting: true}),
     do: source
 
-  defp get_elixir_cell_code(%{source: source}), do: format_code(source)
+  defp get_code_cell_code(%{source: source}), do: format_code(source)
 
   defp render_metadata(metadata) do
     metadata_json = Jason.encode!(metadata)
@@ -84,7 +225,7 @@ defmodule Livebook.LiveMarkdown.Export do
 
   defp format_markdown_source(markdown) do
     markdown
-    |> EarmarkParser.as_ast()
+    |> MarkdownHelpers.markdown_to_block_ast()
     |> elem(1)
     |> rewrite_ast()
     |> MarkdownHelpers.markdown_from_ast()
@@ -123,13 +264,20 @@ defmodule Livebook.LiveMarkdown.Export do
     end
   end
 
-  defp put_truthy(map, entries) do
+  defp put_unless_default(map, entries, defaults) do
     Enum.reduce(entries, map, fn {key, value}, map ->
-      if value do
-        Map.put(map, key, value)
-      else
+      if value == defaults[key] do
         map
+      else
+        Map.put(map, key, value)
       end
     end)
+  end
+
+  defp strip_ansi(string) do
+    string
+    |> Livebook.Utils.ANSI.parse_ansi_string()
+    |> elem(0)
+    |> Enum.map(fn {_modifiers, string} -> string end)
   end
 end

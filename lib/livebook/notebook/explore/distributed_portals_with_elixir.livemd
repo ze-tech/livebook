@@ -13,6 +13,8 @@ For a more structured introduction to the language, see [Elixir's
 Getting Started guide](https://elixir-lang.org/getting-started/introduction.html)
 and [the many learning resources available](https://elixir-lang.org/learning.html).
 
+<!-- livebook:{"break_markdown":true} -->
+
 ### The plan ahead
 
 The Portal game consists of a series of puzzles that must be
@@ -192,20 +194,14 @@ Date.from_iso8601("2020-02-30")
 
 Now, what happens if we want our code to behave differently depending
 if the date is valid or not? We can use `case` to pattern match on
-the different tuples. This is also a good opportunity to use Livebook's
-inputs to pass different values to our code:
-
-<!-- livebook:{"livebook_object":"cell_input","name":"Date","type":"text","value":""} -->
+the different tuples:
 
 ```elixir
-# Read the date input, which returns something like "2020-02-30\n"
-input = IO.gets("Date: ")
-
-# So we trim the newline from the input value
-trimmed = String.trim(input)
+# Give an invalid date as input
+input = "2020-02-30"
 
 # And then match on the return value
-case Date.from_iso8601(trimmed) do
+case Date.from_iso8601(input) do
   {:ok, date} ->
     "We got a valid date: #{inspect(date)}"
 
@@ -214,15 +210,11 @@ case Date.from_iso8601(trimmed) do
 end
 ```
 
-We have been using `IO.inspect` to write values out of the notebook
-and here we used `IO.gets` to read data in. The string passed to
-`IO.gets` must have the same suffix as the input name. The returned
-string is always appended with a newline. Then we remove the trailing new
-line and use `case` to pattern match on the different outcomes of the
-`Date.from_iso8601` function. We say the `case` above has two clauses,
-one matching on `{:ok, date}` and another on `{:error, reason}`.
-Try changing the input and re-executing the cell to see how the outcome
-changes.
+In this example, we are using `case` to pattern match on the different
+outcomes of the `Date.from_iso8601`. We say the `case` above has two
+clauses, one matching on `{:ok, date}` and another on `{:error, reason}`.
+Now try changing the `input` variable above and reevaluate the cell
+accordingly. What happens when you give it a valid date?
 
 Finally, we can also pattern match on maps. This is used to extract the
 values for the given keys:
@@ -249,7 +241,7 @@ mutated the list. We can break a list apart or add new elements to the
 head, but the original list is never modified.
 
 That said, when we need to keep some sort of state, like the data
-transfering through a portal, we must use an abstraction that stores
+transferring through a portal, we must use an abstraction that stores
 this state for us. One such abstraction in Elixir is called an agent.
 Before we use agents, we need to briefly talk about anonymous functions.
 
@@ -647,6 +639,8 @@ However, before we start, there is one big disclaimer:
 > resources available for Elixir, which will provide a more solid ground to
 > leverage the Erlang VM and its distributed features.
 
+<!-- livebook:{"break_markdown":true} -->
+
 ### Distribution 101
 
 When Livebook executes the code in a notebook, it starts a separate Elixir
@@ -694,6 +688,8 @@ Node.get_cookie()
 
 Now we have everything we need to connect across notebooks.
 
+<!-- livebook:{"break_markdown":true} -->
+
 ### Notebook connections
 
 In order to connect across notebooks, open up [a new empty notebook](/explore/notebooks/new)
@@ -703,48 +699,28 @@ and execute it:
 <!-- livebook:{"force_markdown":true} -->
 
 ```elixir
-IO.puts node()
-IO.puts Node.get_cookie()
+IO.inspect node()
+IO.inspect Node.get_cookie()
+:ok
 ```
 
-Now paste the result of the other node name and its cookie in the inputs below:
-
-<!-- livebook:{"livebook_object":"cell_input","name":"Other node","type":"text","value":""} -->
-
-<!-- livebook:{"livebook_object":"cell_input","name":"Other cookie","type":"text","value":""} -->
-
-And now execute the code cell below, which will read the inputs, configure the
-cookie, and connect to the other notebook:
+Now paste the result of the other node name and its cookie in the variables below:
 
 ```elixir
-other_node =
-  IO.gets("Other node: ")
-  |> String.trim()
-  |> String.to_atom()
+other_node = :"name-of-the@other-node"
+other_cookie = :"value-of-the-other-cookie"
+```
 
-other_cookie =
-  IO.gets("Other cookie: ")
-  |> String.trim()
-  |> String.to_atom()
+With both variables defined, let's connect to the other node with the given cookie:
 
+```elixir
 Node.set_cookie(other_node, other_cookie)
 Node.connect(other_node)
 ```
 
-If it returns true, it means it connected as expected. The code above uses
-`IO.gets/1` to read the input values, as we did earlier in this notebook,
-then removes the trailing newline, and converts the strings to atoms. We
-did so using the pipe operator `|>`, which gets the result of the previous
-function and passes it as first argument to the next function. For example,
-the first line is equivalent to `String.to_atom(String.trim(IO.gets("Other node: ")))`,
-but it is much more readable as a pipeline.
-
-Notice we also stored the name of the other node in a `other_node` variable
-for convenience.
-
-Now we are ready to start a distributed transfer. The first step is to go
-to the other notebook and shoot a door. You can try calling the following
-there:
+If it returns true, it means it connected as expected and we are ready to start a
+distributed transfer. The first step is to go to the other notebook and shoot a door.
+You can try calling the following there:
 
 <!-- livebook:{"force_markdown":true} -->
 
@@ -757,9 +733,9 @@ Portal code has been defined in this notebook but it is not available
 in the other notebook. If we were working on an actual Elixir project,
 this issue wouldn't exist, because we would start multiple nodes on top
 of the same codebase with the same modules, but we can't do so here.
-To work around this, you should simply copy the cell that define the
-`Portal.Door` module from this notebook into the other notebook and
-execute it. Now we should be able to shoot a door in the other node:
+To work around this, copy the cell that defines the `Portal.Door` module
+from this notebook into the other notebook and execute it. Now in the other
+node you should be able to start a door:
 
 <!-- livebook:{"force_markdown":true} -->
 
@@ -767,12 +743,14 @@ execute it. Now we should be able to shoot a door in the other node:
 Portal.Door.start_link(:blue)
 ```
 
+<!-- livebook:{"break_markdown":true} -->
+
 ### Cross-node references
 
 Now that we have spawned a door on the other notebook, we can directly read
-its content from this notebook. So far, we have been using an atom, such
-as `:blue`, to represent the doors, but we can also use the `{name, node}`
-notation to refer to a process in another node. Let's give it a try:
+its content from this notebook. So far, we have been using atoms to represent
+doors, such as `:blue`, but we can also use the `{name, node}` notation to refer
+to a process in another node. Let's give it a try:
 
 ```elixir
 blue = {:blue, other_node}

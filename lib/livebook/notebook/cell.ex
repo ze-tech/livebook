@@ -12,19 +12,11 @@ defmodule Livebook.Notebook.Cell do
 
   @type id :: Utils.id()
 
-  @typedoc """
-  Arbitrary cell information persisted as part of the notebook.
+  @type t :: Cell.Markdown.t() | Cell.Code.t() | Cell.Smart.t()
 
-  ## Recognised entries
+  @type type :: :markdown | :code | :smart
 
-    * `disable_formatting` - whether this particular cell should
-      not be automatically formatted. Relevant for Elixir cells only.
-  """
-  @type metadata :: %{String.t() => term()}
-
-  @type t :: Cell.Elixir.t() | Cell.Markdown.t() | Cell.Input.t()
-
-  @type type :: :markdown | :elixir | :input
+  @type indexed_output :: {non_neg_integer(), Livebook.Runtime.output()}
 
   @doc """
   Returns an empty cell of the given type.
@@ -33,8 +25,8 @@ defmodule Livebook.Notebook.Cell do
   def new(type)
 
   def new(:markdown), do: Cell.Markdown.new()
-  def new(:elixir), do: Cell.Elixir.new()
-  def new(:input), do: Cell.Input.new()
+  def new(:code), do: Cell.Code.new()
+  def new(:smart), do: Cell.Smart.new()
 
   @doc """
   Returns an atom representing the type of the given cell.
@@ -42,7 +34,54 @@ defmodule Livebook.Notebook.Cell do
   @spec type(t()) :: type()
   def type(cell)
 
-  def type(%Cell.Elixir{}), do: :elixir
+  def type(%Cell.Code{}), do: :code
   def type(%Cell.Markdown{}), do: :markdown
-  def type(%Cell.Input{}), do: :input
+  def type(%Cell.Smart{}), do: :smart
+
+  @doc """
+  Checks if the given cell can be evaluated.
+  """
+  @spec evaluable?(t()) :: boolean()
+  def evaluable?(cell)
+
+  def evaluable?(%Cell.Code{}), do: true
+  def evaluable?(%Cell.Smart{}), do: true
+  def evaluable?(_cell), do: false
+
+  @doc """
+  Extracts all inputs from the given output.
+  """
+  @spec find_inputs_in_output(indexed_output()) :: list(input_attrs :: map())
+  def find_inputs_in_output(output)
+
+  def find_inputs_in_output({_idx, {:input, attrs}}) do
+    [attrs]
+  end
+
+  def find_inputs_in_output({_idx, {:control, %{type: :form, fields: fields}}}) do
+    Keyword.values(fields)
+  end
+
+  def find_inputs_in_output({_idx, {:frame, outputs, _}}) do
+    Enum.flat_map(outputs, &find_inputs_in_output/1)
+  end
+
+  def find_inputs_in_output(_output), do: []
+
+  @setup_cell_id "setup"
+
+  @doc """
+  Checks if the given cell is the setup code cell.
+  """
+  @spec setup?(t()) :: boolean()
+  def setup?(cell)
+
+  def setup?(%Cell.Code{id: @setup_cell_id}), do: true
+  def setup?(_cell), do: false
+
+  @doc """
+  The fixed identifier of the setup cell.
+  """
+  @spec setup_cell_id() :: id()
+  def setup_cell_id(), do: @setup_cell_id
 end

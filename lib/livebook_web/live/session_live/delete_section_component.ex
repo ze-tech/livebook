@@ -3,7 +3,7 @@ defmodule LivebookWeb.SessionLive.DeleteSectionComponent do
 
   @impl true
   def render(assigns) do
-    ~L"""
+    ~H"""
     <div class="p-6 pb-4 flex flex-col space-y-8">
       <h3 class="text-2xl font-semibold text-gray-800">
         Delete section
@@ -12,18 +12,22 @@ defmodule LivebookWeb.SessionLive.DeleteSectionComponent do
         Are you sure you want to delete this section -
         <span class="font-semibold">“<%= @section.name %>”</span>?
       </p>
-      <form phx-submit="delete" phx-target="<%= @myself %>">
+      <form phx-submit="delete" phx-target={@myself}>
         <h3 class="mb-1 text-lg font-semibold text-gray-800">
           Options
         </h3>
         <%# If there is no previous section, all cells need to be deleted %>
-        <%= render_switch("delete_cells", @is_first, "Delete all cells in this section", disabled: @is_first) %>
+        <.switch_checkbox
+          name="delete_cells"
+          label="Delete all cells in this section"
+          checked={@is_first}
+          disabled={@is_first} />
         <div class="mt-8 flex justify-end space-x-2">
-          <button type="submit" class="button button-red">
-            <%= remix_icon("delete-bin-6-line", class: "align-middle mr-1") %>
+          <button type="submit" class="button-base button-red">
+            <.remix_icon icon="delete-bin-6-line" class="align-middle mr-1" />
             Delete
           </button>
-          <%= live_patch "Cancel", to: @return_to, class: "button button-outlined-gray" %>
+          <%= live_patch "Cancel", to: @return_to, class: "button-base button-outlined-gray" %>
         </div>
       </form>
     </div>
@@ -31,15 +35,15 @@ defmodule LivebookWeb.SessionLive.DeleteSectionComponent do
   end
 
   @impl true
-  def handle_event("delete", params, socket) do
-    delete_cells? = Map.has_key?(params, "delete_cells")
+  def handle_event("delete", %{"delete_cells" => delete_cells}, socket) do
+    delete_cells? = delete_cells == "true"
 
     Livebook.Session.delete_section(
-      socket.assigns.session_id,
+      socket.assigns.session.pid,
       socket.assigns.section.id,
       delete_cells?
     )
 
-    {:noreply, push_patch(socket, to: socket.assigns.return_to)}
+    {:noreply, push_patch(socket, to: socket.assigns.return_to, replace: true)}
   end
 end

@@ -1,26 +1,30 @@
 defmodule LivebookWeb.HomeLive.CloseSessionComponent do
   use LivebookWeb, :live_component
 
-  alias Livebook.SessionSupervisor
+  alias LivebookWeb.HomeLive.SessionListComponent
 
   @impl true
   def render(assigns) do
-    ~L"""
+    ~H"""
     <div class="p-6 pb-4 flex flex-col space-y-8">
       <h3 class="text-2xl font-semibold text-gray-800">
         Close session
       </h3>
       <p class="text-gray-700">
-        Are you sure you want to close this section -
-        <span class="font-semibold">“<%= @session_summary.notebook_name %>”</span>?
-        This won't delete any persisted files.
+        Are you sure you want to close this session -
+        <span class="font-semibold">“<%= @session.notebook_name %>”</span>?
+        <br/>
+        <%= if @session.file,
+              do: "This won't delete any persisted files.",
+              else: "The notebook is not persisted and content may be lost." %>
       </p>
       <div class="mt-8 flex justify-end space-x-2">
-        <button class="button button-red" phx-click="close" phx-target="<%= @myself %>">
-          <%= remix_icon("close-circle-line", class: "align-middle mr-1") %>
+        <button class="button-base button-red" role="button"
+          phx-click={SessionListComponent.toggle_edit(:off) |> JS.push("close", target: @myself)}>
+          <.remix_icon icon="close-circle-line" class="align-middle mr-1" />
           Close session
         </button>
-        <%= live_patch "Cancel", to: @return_to, class: "button button-outlined-gray" %>
+        <%= live_patch "Cancel", to: @return_to, class: "button-base button-outlined-gray" %>
       </div>
     </div>
     """
@@ -28,7 +32,7 @@ defmodule LivebookWeb.HomeLive.CloseSessionComponent do
 
   @impl true
   def handle_event("close", %{}, socket) do
-    SessionSupervisor.close_session(socket.assigns.session_summary.session_id)
-    {:noreply, push_patch(socket, to: socket.assigns.return_to)}
+    Livebook.Session.close(socket.assigns.session.pid)
+    {:noreply, push_patch(socket, to: socket.assigns.return_to, replace: true)}
   end
 end

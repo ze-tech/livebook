@@ -20,18 +20,25 @@ defmodule Livebook.Runtime.ErlDist do
   # For further details see `Livebook.Runtime.ErlDist.NodeManager`.
 
   # Modules to load into the connected node.
-  @required_modules [
-    Livebook.Evaluator,
-    Livebook.Evaluator.IOProxy,
-    Livebook.Evaluator.DefaultFormatter,
-    Livebook.Completion,
-    Livebook.Runtime.ErlDist,
-    Livebook.Runtime.ErlDist.NodeManager,
-    Livebook.Runtime.ErlDist.RuntimeServer,
-    Livebook.Runtime.ErlDist.EvaluatorSupervisor,
-    Livebook.Runtime.ErlDist.IOForwardGL,
-    Livebook.Runtime.ErlDist.LoggerGLBackend
-  ]
+  def required_modules do
+    [
+      Livebook.Runtime.Evaluator,
+      Livebook.Runtime.Evaluator.IOProxy,
+      Livebook.Runtime.Evaluator.ObjectTracker,
+      Livebook.Runtime.Evaluator.DefaultFormatter,
+      Livebook.Intellisense,
+      Livebook.Intellisense.Docs,
+      Livebook.Intellisense.IdentifierMatcher,
+      Livebook.Intellisense.SignatureMatcher,
+      Livebook.Runtime.ErlDist,
+      Livebook.Runtime.ErlDist.NodeManager,
+      Livebook.Runtime.ErlDist.RuntimeServer,
+      Livebook.Runtime.ErlDist.EvaluatorSupervisor,
+      Livebook.Runtime.ErlDist.IOForwardGL,
+      Livebook.Runtime.ErlDist.LoggerGLBackend,
+      Livebook.Runtime.ErlDist.SmartCellGL
+    ]
+  end
 
   @doc """
   Starts a runtime server on the given node.
@@ -39,24 +46,46 @@ defmodule Livebook.Runtime.ErlDist do
   If necessary, the required modules are loaded
   into the given node and the node manager process
   is started with `node_manager_opts`.
+
+  ## Options
+
+    * `:node_manager_opts` - see `Livebook.Runtime.ErlDist.NodeManager.start/1`
+
+    * `:runtime_server_opts` - see `Livebook.Runtime.ErlDist.RuntimeServer.start_link/1`
   """
   @spec initialize(node(), keyword()) :: pid()
-  def initialize(node, node_manager_opts \\ []) do
+  def initialize(node, opts \\ []) do
     unless modules_loaded?(node) do
       load_required_modules(node)
     end
 
     unless node_manager_started?(node) do
-      start_node_manager(node, node_manager_opts)
+      start_node_manager(node, opts[:node_manager_opts] || [])
     end
 
-    start_runtime_server(node)
+    start_runtime_server(node, opts[:runtime_server_opts] || [])
   end
 
   defp load_required_modules(node) do
-    for module <- @required_modules do
+    for module <- required_modules() do
       {_module, binary, filename} = :code.get_object_code(module)
-      {:module, _} = :rpc.call(node, :code, :load_binary, [module, filename, binary])
+
+      case :rpc.call(node, :code, :load_binary, [module, filename, binary]) do
+        {:module, _} ->
+          :ok
+
+        {:error, reason} ->
+          local_otp = :erlang.system_info(:otp_release)
+          remote_otp = :rpc.call(node, :erlang, :system_info, [:otp_release])
+
+          if local_otp != remote_otp do
+            raise RuntimeError,
+                  "failed to load #{inspect(module)} module into the remote node, potentially due to Erlang/OTP version mismatch, reason: #{inspect(reason)} (local #{local_otp} != remote #{remote_otp})"
+          else
+            raise RuntimeError,
+                  "failed to load #{inspect(module)} module into the remote node, reason: #{inspect(reason)}"
+          end
+      end
     end
   end
 
@@ -64,8 +93,8 @@ defmodule Livebook.Runtime.ErlDist do
     :rpc.call(node, Livebook.Runtime.ErlDist.NodeManager, :start, [opts])
   end
 
-  defp start_runtime_server(node) do
-    Livebook.Runtime.ErlDist.NodeManager.start_runtime_server(node)
+  defp start_runtime_server(node, opts) do
+    Livebook.Runtime.ErlDist.NodeManager.start_runtime_server(node, opts)
   end
 
   defp modules_loaded?(node) do
@@ -83,7 +112,7 @@ defmodule Livebook.Runtime.ErlDist do
   Unloads the previously loaded Livebook modules from the caller node.
   """
   def unload_required_modules() do
-    for module <- @required_modules do
+    for module <- required_modules() do
       # If we attached, detached and attached again, there may still
       # be deleted module code, so purge it first.
       :code.purge(module)

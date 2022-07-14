@@ -64,62 +64,368 @@ defmodule Livebook.NotebookTest do
     end
   end
 
-  describe "input_cell_for_prompt/3" do
-    test "returns an error if no input matches the given prompt" do
-      cell1 = Cell.new(:elixir)
-
+  describe "cell_dependency_graph/1" do
+    test "computes a linear graph for regular sections" do
       notebook = %{
         Notebook.new()
         | sections: [
-            %{Section.new() | cells: [cell1]}
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:markdown) | id: "c1"},
+                  %{Cell.new(:code) | id: "c2"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s2",
+                cells: [
+                  %{Cell.new(:markdown) | id: "c3"},
+                  %{Cell.new(:code) | id: "c4"}
+                ]
+            }
           ]
       }
 
-      assert :error = Notebook.input_cell_for_prompt(notebook, cell1.id, "name")
+      assert Notebook.cell_dependency_graph(notebook) == %{
+               "c4" => "c3",
+               "c3" => "c2",
+               "c2" => "c1",
+               "c1" => "setup",
+               "setup" => nil
+             }
     end
 
-    test "returns an input field if one is matching" do
-      cell1 = %{Cell.new(:input) | name: "name", value: "Jake Peralta"}
-      cell2 = Cell.new(:elixir)
-
+    test "ignores empty sections" do
       notebook = %{
         Notebook.new()
         | sections: [
-            %{Section.new() | cells: [cell1, cell2]}
+            %{Section.new() | id: "s1", cells: [%{Cell.new(:code) | id: "c1"}]},
+            %{Section.new() | id: "s2", cells: []},
+            %{Section.new() | id: "s3", cells: [%{Cell.new(:code) | id: "c2"}]}
           ]
       }
 
-      assert {:ok, ^cell1} = Notebook.input_cell_for_prompt(notebook, cell2.id, "name")
+      assert Notebook.cell_dependency_graph(notebook) == %{
+               "c2" => "c1",
+               "c1" => "setup",
+               "setup" => nil
+             }
     end
 
-    test "returns the first input if there are many with the same name" do
-      cell1 = %{Cell.new(:input) | name: "name", value: "Amy Santiago"}
-      cell2 = %{Cell.new(:input) | name: "name", value: "Jake Peralta"}
-      cell3 = Cell.new(:elixir)
-
+    test "computes a non-linear graph if there are branching sections" do
       notebook = %{
         Notebook.new()
         | sections: [
-            %{Section.new() | cells: [cell1, cell2, cell3]}
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1"},
+                  %{Cell.new(:code) | id: "c2"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s2",
+                parent_id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c3"},
+                  %{Cell.new(:code) | id: "c4"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s3",
+                cells: [
+                  %{Cell.new(:code) | id: "c5"},
+                  %{Cell.new(:code) | id: "c6"}
+                ]
+            }
           ]
       }
 
-      assert {:ok, ^cell2} = Notebook.input_cell_for_prompt(notebook, cell3.id, "name")
+      assert Notebook.cell_dependency_graph(notebook) == %{
+               "c6" => "c5",
+               "c5" => "c2",
+               "c4" => "c3",
+               "c3" => "c2",
+               "c2" => "c1",
+               "c1" => "setup",
+               "setup" => nil
+             }
     end
 
-    test "returns longest-prefix input if many match the prompt" do
-      cell1 = %{Cell.new(:input) | name: "name", value: "Amy Santiago"}
-      cell2 = %{Cell.new(:input) | name: "nam", value: "Jake Peralta"}
-      cell3 = Cell.new(:elixir)
-
+    test "handles branching sections pointing to empty sections" do
       notebook = %{
         Notebook.new()
         | sections: [
-            %{Section.new() | cells: [cell1, cell2, cell3]}
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s2",
+                cells: []
+            },
+            %{
+              Section.new()
+              | id: "s3",
+                parent_id: "s2",
+                cells: [
+                  %{Cell.new(:code) | id: "c2"}
+                ]
+            }
           ]
       }
 
-      assert {:ok, ^cell1} = Notebook.input_cell_for_prompt(notebook, cell3.id, "name: ")
+      assert Notebook.cell_dependency_graph(notebook) == %{
+               "c2" => "c1",
+               "c1" => "setup",
+               "setup" => nil
+             }
+    end
+
+    test "handles branching sections placed further in the notebook" do
+      notebook = %{
+        Notebook.new()
+        | sections: [
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s2",
+                cells: [
+                  %{Cell.new(:code) | id: "c2"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s3",
+                parent_id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c3"}
+                ]
+            },
+            %{
+              Section.new()
+              | id: "s4",
+                cells: [
+                  %{Cell.new(:code) | id: "c4"}
+                ]
+            }
+          ]
+      }
+
+      assert Notebook.cell_dependency_graph(notebook) == %{
+               "c4" => "c2",
+               "c3" => "c1",
+               "c2" => "c1",
+               "c1" => "setup",
+               "setup" => nil
+             }
+    end
+
+    test "given :cell_filter option, includes only the matching cells" do
+      notebook = %{
+        Notebook.new()
+        | sections: [
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1"},
+                  %{Cell.new(:markdown) | id: "c2"},
+                  %{Cell.new(:code) | id: "c3"}
+                ]
+            }
+          ]
+      }
+
+      assert Notebook.cell_dependency_graph(notebook, cell_filter: &Cell.evaluable?/1) ==
+               %{
+                 "c3" => "c1",
+                 "c1" => "setup",
+                 "setup" => nil
+               }
+    end
+  end
+
+  describe "find_asset_info/2" do
+    test "returns asset info matching the given type if found" do
+      assets_info = %{archive: "/path/to/archive.tar.gz", hash: "abcd", js_path: "main.js"}
+      js_info = %{js_view: %{assets: assets_info}}
+      output = {:js, js_info}
+
+      notebook = %{
+        Notebook.new()
+        | sections: [%{Section.new() | cells: [%{Cell.new(:code) | outputs: [{0, output}]}]}]
+      }
+
+      assert ^assets_info = Notebook.find_asset_info(notebook, "abcd")
+    end
+
+    test "returns nil if no matching info is found" do
+      notebook = Notebook.new()
+      assert Notebook.find_asset_info(notebook, "abcd") == nil
+    end
+  end
+
+  describe "add_cell_output/3" do
+    test "merges consecutive stdout results" do
+      notebook = %{
+        Notebook.new()
+        | sections: [
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1", outputs: [{0, {:stdout, "Hola"}}]}
+                ]
+            }
+          ],
+          output_counter: 1
+      }
+
+      assert %{
+               sections: [
+                 %{
+                   cells: [%{outputs: [{0, {:stdout, "Hola amigo!"}}]}]
+                 }
+               ]
+             } = Notebook.add_cell_output(notebook, "c1", {:stdout, " amigo!"})
+    end
+
+    test "normalizes individual stdout results to respect CR" do
+      notebook = %{
+        Notebook.new()
+        | sections: [
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1", outputs: []}
+                ]
+            }
+          ],
+          output_counter: 0
+      }
+
+      assert %{
+               sections: [
+                 %{
+                   cells: [%{outputs: [{0, {:stdout, "Hey"}}]}]
+                 }
+               ]
+             } = Notebook.add_cell_output(notebook, "c1", {:stdout, "Hola\rHey"})
+    end
+
+    test "normalizes consecutive stdout results to respect CR" do
+      notebook = %{
+        Notebook.new()
+        | sections: [
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{Cell.new(:code) | id: "c1", outputs: [{0, {:stdout, "Hola"}}]}
+                ]
+            }
+          ],
+          output_counter: 1
+      }
+
+      assert %{
+               sections: [
+                 %{
+                   cells: [%{outputs: [{0, {:stdout, "amigo!\r"}}]}]
+                 }
+               ]
+             } = Notebook.add_cell_output(notebook, "c1", {:stdout, "\ramigo!\r"})
+    end
+
+    test "updates existing frames on frame update output" do
+      notebook = %{
+        Notebook.new()
+        | sections: [
+            %{
+              Section.new()
+              | id: "s1",
+                cells: [
+                  %{
+                    Cell.new(:code)
+                    | id: "c1",
+                      outputs: [{0, {:frame, [], %{ref: "1", type: :default}}}]
+                  },
+                  %{
+                    Cell.new(:code)
+                    | id: "c2",
+                      outputs: [{1, {:frame, [], %{ref: "1", type: :default}}}]
+                  }
+                ]
+            }
+          ],
+          output_counter: 2
+      }
+
+      assert %{
+               sections: [
+                 %{
+                   cells: [
+                     %{
+                       outputs: [
+                         {0, {:frame, [{2, {:text, "hola"}}], %{ref: "1", type: :default}}}
+                       ]
+                     },
+                     %{
+                       outputs: [
+                         {1, {:frame, [{3, {:text, "hola"}}], %{ref: "1", type: :default}}}
+                       ]
+                     }
+                   ]
+                 }
+               ]
+             } =
+               Notebook.add_cell_output(
+                 notebook,
+                 "c2",
+                 {:frame, [{:text, "hola"}], %{ref: "1", type: :replace}}
+               )
+    end
+  end
+
+  describe "find_frame_outputs/2" do
+    test "returns frame outputs with matching ref" do
+      frame_output = {0, {:frame, [], %{ref: "1", type: :default}}}
+
+      notebook = %{
+        Notebook.new()
+        | sections: [%{Section.new() | cells: [%{Cell.new(:code) | outputs: [frame_output]}]}]
+      }
+
+      assert [^frame_output] = Notebook.find_frame_outputs(notebook, "1")
+    end
+
+    test "finds a nested frame" do
+      nested_frame_output = {0, {:frame, [], %{ref: "2", type: :default}}}
+      frame_output = {0, {:frame, [nested_frame_output], %{ref: "1", type: :default}}}
+
+      notebook = %{
+        Notebook.new()
+        | sections: [%{Section.new() | cells: [%{Cell.new(:code) | outputs: [frame_output]}]}]
+      }
+
+      assert [^nested_frame_output] = Notebook.find_frame_outputs(notebook, "2")
     end
   end
 end

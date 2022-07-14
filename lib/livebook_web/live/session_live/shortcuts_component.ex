@@ -12,6 +12,12 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
         basic: true
       },
       %{
+        seq: ["ctrl", "shift", "␣"],
+        seq_mac: ["⌘", "⇧", "␣"],
+        press_all: true,
+        desc: "Show signature help"
+      },
+      %{
         seq: ["ctrl", "shift", "i"],
         seq_mac: ["⇧", "⌥", "f"],
         seq_windows: ["shift", "alt", "f"],
@@ -38,8 +44,8 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
         desc: "Indent lines"
       },
       %{
-        seq: ["ctrl", "]"],
-        seq_mac: ["⌘", "]"],
+        seq: ["ctrl", "["],
+        seq_mac: ["⌘", "["],
         press_all: true,
         desc: "Outdent lines"
       },
@@ -81,21 +87,22 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
       %{seq: ["J"], desc: "Move cell down"},
       %{seq: ["K"], desc: "Move cell up"},
       %{seq: ["i"], desc: "Switch to insert mode", basic: true},
-      %{seq: ["n"], desc: "Insert Elixir cell below", basic: true},
+      %{seq: ["n"], desc: "Insert Code cell below", basic: true},
       %{seq: ["m"], desc: "Insert Markdown cell below", basic: true},
-      %{seq: ["N"], desc: "Insert Elixir cell above"},
+      %{seq: ["N"], desc: "Insert Code cell above"},
       %{seq: ["M"], desc: "Insert Markdown cell above"},
+      %{seq: ["z"], desc: "Toggle code zen"},
       %{seq: ["d", "d"], desc: "Delete cell", basic: true},
       %{seq: ["e", "e"], desc: "Evaluate cell"},
       %{seq: ["e", "s"], desc: "Evaluate section"},
-      %{seq: ["e", "a"], desc: "Evaluate all stale/new cells", basic: true},
-      %{seq: ["e", "j"], desc: "Evaluate cells below"},
+      %{seq: ["e", "a"], desc: "Evaluate all outdated cells", basic: true},
       %{seq: ["e", "x"], desc: "Cancel cell evaluation"},
       %{seq: ["s", "s"], desc: "Toggle sections panel"},
       %{seq: ["s", "u"], desc: "Toggle users panel"},
-      %{seq: ["s", "r"], desc: "Show runtime settings"},
+      %{seq: ["s", "r"], desc: "Show runtime panel"},
       %{seq: ["s", "b"], desc: "Show bin"},
-      %{seq: ["0", "0"], desc: "Restart current runtime"}
+      %{seq: ["s", "p"], desc: "Show package search"},
+      %{seq: ["0", "0"], desc: "Reconnect current runtime"}
     ],
     universal: [
       %{
@@ -103,6 +110,13 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
         seq_mac: ["⌘", "↵"],
         press_all: true,
         desc: "Evaluate cell in either mode",
+        basic: true
+      },
+      %{
+        seq: ["ctrl", "shift", "↵"],
+        seq_mac: ["⌘", "⇧", "↵"],
+        press_all: true,
+        desc: "Evaluate current and all outdated cells",
         basic: true
       },
       %{
@@ -122,7 +136,7 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
 
   @impl true
   def render(assigns) do
-    ~L"""
+    ~H"""
     <div class="p-6 flex flex-col space-y-3">
       <h3 class="text-2xl font-semibold text-gray-800">
         Keyboard shortcuts
@@ -134,54 +148,55 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
         the notebook and execute commands, whereas in the <span class="font-semibold">insert mode</span>
         you have editor focus and directly modify the given cell content.
       </p>
-      <%= render_shortcuts_section("Navigation mode", @shortcuts.navigation_mode, @basic, @platform) %>
-      <%= render_shortcuts_section("Insert mode", @shortcuts.insert_mode, @basic, @platform) %>
-      <%= render_shortcuts_section("Universal", @shortcuts.universal, @basic, @platform) %>
-      <div class="mt-8 flex justify-end">
-        <form phx-change="settings" onsubmit="return false;" phx-target="<%= @myself %>">
-          <%= render_switch("basic", @basic, "Basic view (essential shortcuts only)") %>
+      <div class="flex">
+        <form class="mt-4" phx-change="settings" onsubmit="return false;" phx-target={@myself}>
+          <.switch_checkbox
+            name="basic"
+            label="Basic view (essential shortcuts only)"
+            checked={@basic} />
         </form>
       </div>
+      <.shortcuts_section title="Navigation mode" shortcuts={@shortcuts.navigation_mode} basic={@basic} platform={@platform} />
+      <.shortcuts_section title="Insert mode" shortcuts={@shortcuts.insert_mode} basic={@basic} platform={@platform} />
+      <.shortcuts_section title="Universal" shortcuts={@shortcuts.universal} basic={@basic} platform={@platform} />
     </div>
     """
   end
 
-  defp render_shortcuts_section(title, shortcuts, basic, platform) do
+  defp shortcuts_section(assigns) do
     shortcuts =
-      if basic do
-        Enum.filter(shortcuts, & &1[:basic])
+      if assigns.basic do
+        Enum.filter(assigns.shortcuts, & &1[:basic])
       else
-        shortcuts
+        assigns.shortcuts
       end
 
     {left, right} = split_in_half(shortcuts)
-    assigns = %{title: title, left: left, right: right, platform: platform}
+    assigns = assign(assigns, left: left, right: right)
 
-    ~L"""
+    ~H"""
     <h3 class="text-lg font-medium text-gray-900 pt-4">
       <%= @title %>
     </h3>
     <div class="mt-2 flex flex-col lg:flex-row lg:space-x-4">
-      <div class="lg:flex-grow">
-        <%= render_shortcuts_section_table(@left, @platform) %>
+      <div class="lg:grow">
+        <.shortcuts_section_table shortcuts={@left} platform={@platform} />
       </div>
       <div class="lg:w-1/2">
-        <%= render_shortcuts_section_table(@right, @platform) %>
+        <.shortcuts_section_table shortcuts={@right} platform={@platform} />
       </div>
     </div>
     """
   end
 
-  defp render_shortcuts_section_table(shortcuts, platform) do
-    assigns = %{shortcuts: shortcuts, platform: platform}
-
-    ~L"""
+  defp shortcuts_section_table(assigns) do
+    ~H"""
     <table>
       <tbody>
         <%= for shortcut <- @shortcuts do %>
           <tr>
             <td class="py-2 pr-3">
-              <%= render_shortcut_seq(shortcut, @platform) %>
+              <.shortcut shortcut={shortcut} platform={@platform} />
             </td>
             <td class="lg:whitespace-nowrap">
               <%= shortcut.desc %>
@@ -193,19 +208,24 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
     """
   end
 
-  defp render_shortcut_seq(shortcut, platform) do
+  defp shortcut(%{shortcut: shortcut, platform: platform}) do
     seq = shortcut[:"seq_#{platform}"] || shortcut.seq
     press_all = Map.get(shortcut, :press_all, false)
 
     joiner =
       if press_all do
-        remix_icon("add-line", class: "text-lg text-gray-600")
+        assigns = %{}
+
+        ~H"""
+        <.remix_icon icon="add-line" class="text-lg text-gray-600" />
+        """
       end
 
     elements = Enum.map_intersperse(seq, joiner, &content_tag("kbd", &1))
+
     assigns = %{elements: elements}
 
-    ~L"""
+    ~H"""
     <div class="flex space-x-1 items-center markdown">
       <%= for element <- @elements do %>
         <%= element %>
@@ -220,8 +240,8 @@ defmodule LivebookWeb.SessionLive.ShortcutsComponent do
   end
 
   @impl true
-  def handle_event("settings", params, socket) do
-    basic? = Map.has_key?(params, "basic")
+  def handle_event("settings", %{"basic" => basic}, socket) do
+    basic? = basic == "true"
     {:noreply, assign(socket, :basic, basic?)}
   end
 end

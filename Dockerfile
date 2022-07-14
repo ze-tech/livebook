@@ -1,8 +1,13 @@
 # Stage 1
 # Builds the Livebook release
-FROM hexpm/elixir:1.12.0-erlang-24.0-alpine-3.13.3 AS build
+FROM hexpm/elixir:1.13.2-erlang-24.1.7-debian-bullseye-20210902-slim AS build
 
-RUN apk add --no-cache build-base git
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install --no-install-recommends -y \
+        build-essential git && \
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
+    apt-get clean -y && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -20,25 +25,34 @@ RUN mix do deps.get, deps.compile
 
 # Compile and build the release
 COPY rel rel
-COPY priv priv
+COPY static static
+COPY iframe/priv/static/iframe iframe/priv/static/iframe
 COPY lib lib
 # We need README.md during compilation
 # (look for @external_resource "README.md")
 COPY README.md README.md
-RUN mix do compile, release
+RUN mix do compile, release livebook
 
 # Stage 2
-# Prepares the runtime environment and copies over the relase.
+# Prepares the runtime environment and copies over the release.
 # We use the same base image, because we need Erlang, Elixir and Mix
 # during runtime to spawn the Livebook standalone runtimes.
 # Consequently the release doesn't include ERTS as we have it anyway.
-FROM hexpm/elixir:1.12.0-erlang-24.0-alpine-3.13.3
+FROM hexpm/elixir:1.13.2-erlang-24.1.7-debian-bullseye-20210902-slim
 
-RUN apk add --no-cache \
-    # Runtime dependencies
-    openssl ncurses-libs \
-    # In case someone uses `Mix.install/2` and point to a git repo
-    git
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install --no-install-recommends -y \
+        # Runtime dependencies
+        build-essential ca-certificates libncurses5-dev \
+        # In case someone uses `Mix.install/2` and point to a git repo
+        git \
+        # Additional standard tools
+        wget \
+        # In case someone uses Torchx for Nx
+        cmake && \
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
+    apt-get clean -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # Run in the /data directory by default, makes for
 # a good place for the user to mount local volume
@@ -57,11 +71,13 @@ RUN mix local.hex --force && \
 # can be accessed outside the container by binding ports
 ENV LIVEBOOK_IP 0.0.0.0
 
+ENV LIVEBOOK_HOME=/data
+
 # Copy the release build from the previous stage
 COPY --from=build /app/_build/prod/rel/livebook /app
 
-# Make release executables available to any user,
-# in case someone runs the container with `--user`
-RUN find /app -executable -type f -exec chmod +x {} +
+# Make release files available to any user, in case someone
+# runs the container with `--user`
+RUN chmod -R go=u /app
 
 CMD [ "/app/bin/livebook", "start" ]

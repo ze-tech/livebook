@@ -4,13 +4,21 @@ defmodule LivebookWeb.SessionLive.EmbeddedLive do
   alias Livebook.{Session, Runtime}
 
   @impl true
-  def mount(_params, %{"session_id" => session_id}, socket) do
-    {:ok, assign(socket, session_id: session_id)}
+  def mount(_params, %{"session" => session, "current_runtime" => current_runtime}, socket) do
+    unless Livebook.Config.runtime_enabled?(Livebook.Runtime.Embedded) do
+      raise "runtime module not allowed"
+    end
+
+    if connected?(socket) do
+      Session.subscribe(session.id)
+    end
+
+    {:ok, assign(socket, session: session, current_runtime: current_runtime)}
   end
 
   @impl true
   def render(assigns) do
-    ~L"""
+    ~H"""
     <div class="flex-col space-y-5">
       <p class="text-gray-700">
         Run the notebook code within the Livebook node itself.
@@ -25,17 +33,27 @@ defmodule LivebookWeb.SessionLive.EmbeddedLive do
         you restart Livebook. Furthermore, code in one notebook
         may interfere with code from another notebook.
       </p>
-      <button class="button button-blue" phx-click="init">
-        Connect
+      <button class="button-base button-blue" phx-click="init">
+        <%= if(matching_runtime?(@current_runtime), do: "Reconnect", else: "Connect") %>
       </button>
     </div>
     """
   end
 
+  defp matching_runtime?(%Runtime.Embedded{}), do: true
+  defp matching_runtime?(_runtime), do: false
+
   @impl true
   def handle_event("init", _params, socket) do
-    {:ok, runtime} = Runtime.Embedded.init()
-    Session.connect_runtime(socket.assigns.session_id, runtime)
+    {:ok, runtime} = Runtime.Embedded.new() |> Runtime.connect()
+    Session.set_runtime(socket.assigns.session.pid, runtime)
     {:noreply, socket}
   end
+
+  @impl true
+  def handle_info({:operation, {:set_runtime, _pid, runtime}}, socket) do
+    {:noreply, assign(socket, current_runtime: runtime)}
+  end
+
+  def handle_info(_message, socket), do: {:noreply, socket}
 end

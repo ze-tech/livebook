@@ -23,6 +23,9 @@ config :livebook, LivebookWeb.Endpoint,
     ]
   ]
 
+config :livebook, :iframe_port, 4001
+config :livebook, :shutdown_enabled, true
+
 # ## SSL Support
 #
 # In order to use HTTPS in development, a self-signed
@@ -69,3 +72,5 @@ config :phoenix, :plug_init_mode, :runtime
 
 # Disable authentication mode during dev
 config :livebook, :authentication_mode, :disabled
+
+config :livebook, :data_path, Path.expand("tmp/livebook_data/dev")

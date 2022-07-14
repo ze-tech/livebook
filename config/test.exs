@@ -6,19 +6,25 @@ config :livebook, LivebookWeb.Endpoint,
   http: [port: 4002],
   server: false
 
+config :livebook, :iframe_port, 4003
+
 # Print only warnings and errors during test
 config :logger, level: :warn
 
 # Disable authentication mode during test
 config :livebook, :authentication_mode, :disabled
 
-# Use the embedded runtime in tests by default, so they
-# are cheaper to run. Other runtimes can be tested by starting
-# and setting them explicitly
-config :livebook, :default_runtime, {Livebook.Runtime.Embedded, []}
+data_path = Path.expand("tmp/livebook_data/test")
+
+# Clear data path for tests
+if File.exists?(data_path) do
+  File.rm_rf!(data_path)
+end
+
+config :livebook, :data_path, data_path
 
 # Use longnames when running tests in CI, so that no host resolution is required,
-# see https://github.com/elixir-nx/livebook/pull/173#issuecomment-819468549
+# see https://github.com/livebook-dev/livebook/pull/173#issuecomment-819468549
 if System.get_env("CI") == "true" do
   config :livebook, :node, {:longnames, :"livebook@127.0.0.1"}
 end

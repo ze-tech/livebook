@@ -1,20 +1,105 @@
 defprotocol Livebook.Runtime do
   @moduledoc false
 
-  # This protocol defines an interface for evaluation backends.
+  # This protocol defines an interface for code evaluation backends.
   #
-  # Usually a runtime involves a set of processes responsible
-  # for evaluation, which could be running on a different node,
-  # however the protocol does not require that.
+  # Usually a runtime involves a set of processes responsible for
+  # evaluation, which could be running on a different node, however
+  # the protocol does not require that.
 
   @typedoc """
-  A term used to identify evaluation or container.
+  An arbitrary term identifying an evaluation container.
+
+  A container is an abstraction of an isolated group of evaluations.
+  Containers are mostly independent and therefore can be evaluated
+  concurrently (if possible).
+
+  Note that every evaluation can use the resulting binding and env
+  of any previous evaluation, even from a different container.
   """
-  @type ref :: term()
+  @type container_ref :: term()
 
   @typedoc """
-  A single completion result.
+  An arbitrary term identifying an evaluation.
   """
+  @type evaluation_ref :: term()
+
+  @typedoc """
+  A pair identifying evaluation together with its container.
+
+  When the evaluation reference is `nil`, the `locator` points to
+  a container and may be used to represent its default evaluation
+  context.
+  """
+  @type locator :: {container_ref(), evaluation_ref() | nil}
+
+  @typedoc """
+  An output emitted during evaluation or as the final result.
+
+  For more details on output types see `t:Kino.Output.t/0`.
+  """
+  @type output ::
+          :ignored
+          # IO output, adjacent such outputs are treated as a whole
+          | {:stdout, binary()}
+          # Standalone text block
+          | {:text, binary()}
+          # Markdown content
+          | {:markdown, binary()}
+          # A raw image in the given format
+          | {:image, content :: binary(), mime_type :: binary()}
+          # JavaScript powered output
+          | {:js, info :: map()}
+          # Outputs placeholder
+          | {:frame, outputs :: list(output()), info :: map()}
+          # An input field
+          | {:input, attrs :: map()}
+          # A control element
+          | {:control, attrs :: map()}
+          # Internal output format for errors
+          | {:error, message :: binary()}
+
+  @typedoc """
+  Additional information about a complted evaluation.
+  """
+  @type evaluation_response_metadata :: %{
+          evaluation_time_ms: non_neg_integer(),
+          code_error: code_error(),
+          memory_usage: runtime_memory()
+        }
+
+  @typedoc """
+  Recognised intellisense request.
+  """
+  @type intellisense_request ::
+          completion_request()
+          | details_request()
+          | signature_request()
+          | format_request()
+
+  @typedoc """
+  Expected intellisense response.
+
+  Responding with `nil` indicates there is no relevant reply and
+  effectively aborts the request, so it's suitable for error cases.
+  """
+  @type intellisense_response ::
+          nil
+          | completion_response()
+          | details_response()
+          | signature_response()
+          | format_response()
+
+  @typedoc """
+  Looks up a list of identifiers that are suitable code completions
+  for the given hint.
+  """
+  @type completion_request :: {:completion, hint :: String.t()}
+
+  @type completion_response :: %{
+          items: list(completion_item())
+        }
+
   @type completion_item :: %{
           label: String.t(),
           kind: completion_item_kind(),
@@ -23,93 +108,359 @@ defprotocol Livebook.Runtime do
           insert_text: String.t()
         }
 
-  @type completion_item_kind :: :function | :module | :type | :variable | :field
+  @type completion_item_kind ::
+          :function | :module | :struct | :interface | :type | :variable | :field | :keyword
+
+  @typedoc """
+  Looks up more details about an identifier found in `column` in
+  `line`.
+  """
+  @type details_request :: {:details, line :: String.t(), column :: pos_integer()}
+
+  @type details_response :: %{
+          range: %{
+            from: non_neg_integer(),
+            to: non_neg_integer()
+          },
+          contents: list(String.t())
+        }
+
+  @typedoc """
+  Looks up a list of function signatures matching the given hint.
+
+  The resulting information includes current position in the argument
+  list.
+  """
+  @type signature_request :: {:signature, hint :: String.t()}
+
+  @type signature_response :: %{
+          active_argument: non_neg_integer(),
+          signature_items: list(signature_item())
+        }
+
+  @type signature_item :: %{
+          signature: String.t(),
+          arguments: list(String.t()),
+          documentation: String.t() | nil
+        }
+
+  @typedoc """
+  Formats the given code snippet.
+  """
+  @type format_request :: {:format, code :: String.t()}
+
+  @type format_response :: %{
+          code: String.t() | nil,
+          code_error: code_error() | nil
+        }
+
+  @typedoc """
+  A descriptive error pointing to a specific line in the code.
+  """
+  @type code_error :: %{line: pos_integer(), description: String.t()}
+
+  @typedoc """
+  A detailed runtime memory usage.
+
+  The runtime may periodically send memory usage updates as
+
+    * `{:runtime_memory_usage, runtime_memory()}`
+  """
+  @type runtime_memory :: %{
+          atom: size_in_bytes(),
+          binary: size_in_bytes(),
+          code: size_in_bytes(),
+          ets: size_in_bytes(),
+          other: size_in_bytes(),
+          processes: size_in_bytes(),
+          total: size_in_bytes()
+        }
+
+  @type size_in_bytes :: non_neg_integer()
+
+  @typedoc """
+  An information about a smart cell kind.
+
+  The `kind` attribute is an opaque identifier.
+
+  Whenever new smart cells become available the runtime should send
+  the updated list as
+
+    * `{:runtime_smart_cell_definitions, list(smart_cell_definition())}`
+
+  Additionally, the runtime may report extra definitions that require
+  installing external packages, as described by `:requirement`. Also
+  see `add_dependencies/3`.
+  """
+  @type smart_cell_definition :: %{
+          kind: String.t(),
+          name: String.t(),
+          requirement: nil | smart_cell_requirement()
+        }
+
+  @type smart_cell_requirement :: %{
+          variants:
+            list(%{
+              name: String.t(),
+              packages: list(%{name: String.t(), dependency: dependency()})
+            })
+        }
+
+  @type dependency :: term()
+
+  @type search_packages_response :: {:ok, list(package())} | {:error, String.t()}
+
+  @type package :: %{
+          name: String.t(),
+          version: String.t(),
+          description: String.t() | nil,
+          url: String.t() | nil,
+          dependency: dependency()
+        }
+
+  @typedoc """
+  A JavaScript view definition.
+
+  See `t:Kino.Output.js_view/0` for details.
+  """
+  @type js_view :: %{
+          ref: String.t(),
+          pid: Process.dest(),
+          assets: %{
+            archive_path: String.t(),
+            hash: String.t(),
+            js_path: String.t()
+          }
+        }
+
+  @type smart_cell_ref :: String.t()
+
+  @type smart_cell_attrs :: map()
 
   @doc """
-  Sets the caller as runtime owner.
+  Returns relevant information about the runtime.
 
-  The runtime most likely has some kind of leading process,
-  this method starts monitoring it and returns the monitor reference,
-  so the caller knows if the runtime is down by listening to a :DOWN message.
+  Every runtime is expected to have an item with the `"Type"` label.
   """
-  @spec connect(t()) :: reference()
+  @spec describe(t()) :: list({label :: String.t(), String.t()})
+  def describe(runtime)
+
+  @doc """
+  Synchronously initializes the given runtime.
+
+  This function starts the necessary resources and processes.
+  """
+  @spec connect(t()) :: {:ok, t()} | {:error, String.t()}
   def connect(runtime)
 
   @doc """
-  Disconnects the current owner from runtime.
-
-  This should cleanup the underlying node/processes.
+  Checks if the given runtime is in a connected state.
   """
-  @spec disconnect(t()) :: :ok
+  @spec connected?(t()) :: boolean()
+  def connected?(runtime)
+
+  @doc """
+  Sets the caller as the runtime owner.
+
+  The runtime owner is the target for most of the runtime messages
+  and the runtime lifetime is tied to the owner.
+
+  It is advised for each runtime to have a leading process that is
+  coupled to the lifetime of the underlying runtime resources. In
+  such case the `take_ownership/2` function may start monitoring this
+  process and return the monitor reference. This way the owner is
+  notified when the runtime goes down by listening to the :DOWN
+  message with that reference.
+
+  ## Options
+
+    * `:runtime_broadcast_to` - the process to send runtime broadcast
+      events to. Defaults to the owner
+  """
+  @spec take_ownership(t(), keyword()) :: reference()
+  def take_ownership(runtime, opts \\ [])
+
+  @doc """
+  Synchronously disconnects the runtime and cleans up the underlying
+  resources.
+  """
+  @spec disconnect(t()) :: {:ok, t()}
   def disconnect(runtime)
+
+  @doc """
+  Returns a fresh runtime of the same type with the same configuration.
+
+  Note that the runtime is in a stopped state.
+  """
+  @spec duplicate(Runtime.t()) :: Runtime.t()
+  def duplicate(runtime)
 
   @doc """
   Asynchronously parses and evaluates the given code.
 
-  Container isolates a group of evaluations. Every evaluation can use previous
-  evaluation's environment and bindings, as long as they belong to the same container.
+  The given `locator` identifies the container where the code should
+  be evaluated as well as the evaluation reference to store the
+  resulting context under.
 
-  Evaluation outputs are send to the connected runtime owner.
-  The messages should be of the form:
+  Additionally, `base_locator` points to a previous evaluation to be
+  used as the starting point of this evaluation. If not applicable,
+  the previous evaluation reference may be specified as `nil`.
 
-    * `{:evaluation_output, ref, output}` - output captured during evaluation
-    * `{:evaluation_response, ref, output, metadata}` - final result of the evaluation, recognised metadata entries are: `evaluation_time_ms`
+  ## Communication
 
-  The evaluation may request user input by sending `{:evaluation_input, ref, reply_to, prompt}`
-  to the runtime owner, who is supposed to reply with `{:evaluation_input_reply, reply}`
-  with `reply` being either `{:ok, input}` or `:error` if no matching input can be found.
+  During evaluation a number of messages may be sent to the runtime
+  owner. All captured outputs have the form:
 
-  If the evaluation state within a container is lost (e.g. a process goes down),
-  the runtime can send `{:container_down, container_ref, message}` to notify the owner.
+    * `{:runtime_evaluation_output, evaluation_ref, output}`
+
+  When the evaluation completes, the resulting output and metadata
+  is sent as:
+
+    * `{:runtime_evaluation_response, evaluation_ref, output, metadata}`
+
+  Outputs may include input fields. The evaluation may then request
+  the current value of a previously rendered input by sending
+
+    * `{:runtime_evaluation_input, evaluation_ref, reply_to, input_id}`
+
+  to the  runtime owner who is supposed to reply with
+  `{:runtime_evaluation_input_reply, reply}` where `reply` is either
+  `{:ok, value}` or `:error` if no matching input can be found.
+
+  If the evaluation state within a container is lost (for example when
+  a process goes down), the runtime may send
+
+    * `{:runtime_container_down, container_ref, message}`
+
+  to notify the owner.
 
   ## Options
 
-    * `:file` - file to which the evaluated code belongs. Most importantly,
-      this has an impact on the value of `__DIR__`.
+    * `:file` - the file considered as the source during evaluation.
+      This information is relevant for errors formatting and imparts
+      the value of `__DIR__`
+
+    * `:smart_cell_ref` - a reference of the smart cell which code is
+      to be evaluated, if applicable
   """
-  @spec evaluate_code(t(), String.t(), ref(), ref(), ref() | nil, keyword()) :: :ok
-  def evaluate_code(runtime, code, container_ref, evaluation_ref, prev_evaluation_ref, opts \\ [])
+  @spec evaluate_code(t(), String.t(), locator(), locator(), keyword()) :: :ok
+  def evaluate_code(runtime, code, locator, base_locator, opts \\ [])
 
   @doc """
-  Disposes of evaluation identified by the given ref.
+  Disposes of an evaluation identified by the given locator.
 
-  This should be used to cleanup resources related to old evaluation if no longer needed.
+  This can be used to cleanup resources related to an old evaluation
+  if it is no longer needed.
   """
-  @spec forget_evaluation(t(), ref(), ref()) :: :ok
-  def forget_evaluation(runtime, container_ref, evaluation_ref)
+  @spec forget_evaluation(t(), locator()) :: :ok
+  def forget_evaluation(runtime, locator)
 
   @doc """
-  Disposes of evaluation container identified by the given ref.
+  Disposes of an evaluation container identified by the given ref.
 
-  This should be used to cleanup resources keeping track
-  of the container and contained evaluations.
+  This should be used to cleanup resources keeping track of the
+  container all of its evaluations.
   """
-  @spec drop_container(t(), ref()) :: :ok
+  @spec drop_container(t(), container_ref()) :: :ok
   def drop_container(runtime, container_ref)
 
   @doc """
-  Asynchronously finds completion items matching the given `hint` text.
+  Asynchronously handles an intellisense request.
 
-  The given `{container_ref, evaluation_ref}` pair idenfities an evaluation,
-  which bindings and environment are used to provide a more relevant completion results.
-  If there's no appropriate evaluation, `nil` refs can be provided.
+  This part of runtime functionality is used to provide language-
+  and context-specific intellisense features in the text editor.
 
-  Completion response is sent to the `send_to` process as `{:completion_response, ref, items}`,
-  where `items` is a list of `Livebook.Runtime.completion_item()`.
+  The response is sent to the `send_to` process as
+
+    * `{:runtime_intellisense_response, ref, request, response}`.
+
+  The given `base_locator` idenfities an evaluation that may be
+  used as the context when resolving the request (if relevant).
   """
-  @spec request_completion_items(t(), pid(), term(), String.t(), ref() | nil, ref() | nil) :: :ok
-  def request_completion_items(
-        runtime,
-        send_to,
-        ref,
-        hint,
-        container_ref,
-        evaluation_ref
-      )
+  @spec handle_intellisense(t(), pid(), intellisense_request(), locator()) :: reference()
+  def handle_intellisense(runtime, send_to, request, base_locator)
 
   @doc """
-  Synchronously starts a runtime of the same type with the same parameters.
+  Reads file at the given absolute path within the runtime file system.
   """
-  @spec duplicate(Runtime.t()) :: {:ok, Runtime.t()} | {:error, String.t()}
-  def duplicate(runtime)
+  @spec read_file(Runtime.t(), String.t()) :: {:ok, binary()} | {:error, String.t()}
+  def read_file(runtime, path)
+
+  @doc """
+  Starts a smart cell of the given kind.
+
+  `kind` must point to an available `t:smart_cell_definition/0`, which
+  was reported by the runtime. The cell gets initialized with `attrs`,
+  which represent the persisted cell state and determine the current
+  version of the generated source code. The given `ref` is used to
+  identify the cell.
+
+  The cell may depend on evaluation context to provide a better user
+  experience, for instance it may suggest relevant variable names.
+  Similarly to `evaluate_code/5`, `base_locator` must be specified
+  pointing to the evaluation to use as the context. When the locator
+  changes, it can be updated with `set_smart_cell_base_locator/3`.
+
+  Once the cell starts, the runtime sends the following message
+
+    * `{:runtime_smart_cell_started, ref, %{js_view: js_view(), source: String.t()}}`
+
+  ## Communication
+
+  Apart from the regular JS view communication, the cell sends updates
+  to the runtime owner whenever attrs and the generated source code
+  change.
+
+    * `{:runtime_smart_cell_update, ref, attrs, source, %{reevaluate: boolean()}}`
+
+  The attrs are persisted and may be used to restore the smart cell
+  state later. Note that for persistence they get serialized and
+  deserialized as JSON.
+  """
+  @spec start_smart_cell(t(), String.t(), smart_cell_ref(), smart_cell_attrs(), locator()) :: :ok
+  def start_smart_cell(runtime, kind, ref, attrs, base_locator)
+
+  @doc """
+  Updates the locator used by a smart cell as its context.
+
+  See `start_smart_cell/5` for more details.
+  """
+  @spec set_smart_cell_base_locator(t(), smart_cell_ref(), locator()) :: :ok
+  def set_smart_cell_base_locator(runtime, ref, base_locator)
+
+  @doc """
+  Stops smart cell identified by the given reference.
+  """
+  @spec stop_smart_cell(t(), smart_cell_ref()) :: :ok
+  def stop_smart_cell(runtime, ref)
+
+  @doc """
+  Returns true if the given runtime by definition has only a specific
+  set of dependencies.
+
+  Note that if restarting the runtime allows for installing different
+  dependencies, the dependencies are not considered fixed.
+
+  When dependencies are fixed, the following functions are allowed to
+  raise an implementation error: `add_dependencies/3`, `search_packages/3`.
+  """
+  @spec fixed_dependencies?(t()) :: boolean()
+  def fixed_dependencies?(runtime)
+
+  @doc """
+  Updates the given source code to install the given dependencies.
+  """
+  @spec add_dependencies(t(), String.t(), list(dependency())) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def add_dependencies(runtime, code, dependencies)
+
+  @doc """
+  Looks up packages matching the given search.
+
+  The response is sent to the `send_to` process as
+
+    * `{:runtime_search_packages_response, ref, response}`.
+  """
+  @spec search_packages(t(), pid(), String.t()) :: reference()
+  def search_packages(runtime, send_to, search)
 end

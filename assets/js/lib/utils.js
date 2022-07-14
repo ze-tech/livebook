@@ -1,4 +1,5 @@
 import md5 from "crypto-js/md5";
+import sha256 from "crypto-js/sha256";
 import encBase64 from "crypto-js/enc-base64";
 
 export function isMacOS() {
@@ -7,9 +8,17 @@ export function isMacOS() {
 
 export function isEditableElement(element) {
   return (
-    ["input", "textarea"].includes(element.tagName.toLowerCase()) ||
-    element.contentEditable === "true"
+    element.matches && element.matches("input, textarea, [contenteditable]")
   );
+}
+
+export function isElementInViewport(element) {
+  const box = element.getBoundingClientRect();
+  return box.bottom >= 0 && box.top <= window.innerHeight;
+}
+
+export function isElementHidden(element) {
+  return element.offsetParent === null;
 }
 
 export function clamp(n, x, y) {
@@ -53,6 +62,18 @@ export function smoothlyScrollToElement(element) {
   }
 }
 
+export function isScrolledToEnd(element) {
+  // See https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollHeight#determine_if_an_element_has_been_totally_scrolled
+  return (
+    Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop) <
+    1
+  );
+}
+
+export function scrollToEnd(element) {
+  element.scrollTop = element.scrollHeight;
+}
+
 /**
  * Transforms a UTF8 string into base64 encoding.
  */
@@ -71,7 +92,18 @@ export function decodeBase64(binary) {
  * Generates a random string.
  */
 export function randomId() {
-  const array = new Uint8Array(24);
+  return randomString(24);
+}
+
+/**
+ * Generates a random long string.
+ */
+export function randomToken() {
+  return randomString(40);
+}
+
+function randomString(byteSize) {
+  const array = new Uint8Array(byteSize);
   crypto.getRandomValues(array);
   const byteString = String.fromCharCode(...array);
   return btoa(byteString);
@@ -83,6 +115,14 @@ export function randomId() {
  */
 export function md5Base64(string) {
   return md5(string).toString(encBase64);
+}
+
+/**
+ * Calculates SHA256 of the given string and returns
+ * the base64 encoded binary.
+ */
+export function sha256Base64(string) {
+  return sha256(string).toString(encBase64);
 }
 
 /**
@@ -102,4 +142,50 @@ export function throttle(fn, windowMs) {
       }, windowMs);
     }
   };
+}
+
+export function setFavicon(name) {
+  let link = document.querySelector(`[rel="icon"]`);
+
+  if (!link) {
+    link = document.createElement("link");
+    link.rel = "icon";
+    document.head.appendChild(link);
+  }
+
+  link.href = `/${name}.svg`;
+}
+
+export function findChildOrThrow(element, selector) {
+  const child = element.querySelector(selector);
+
+  if (!child) {
+    throw new Error(
+      `expected a child matching ${selector}, but none was found`
+    );
+  }
+
+  return child;
+}
+
+export function cancelEvent(event) {
+  // Cancel any default browser behavior.
+  event.preventDefault();
+  // Stop event propagation (e.g. so it doesn't reach the editor).
+  event.stopPropagation();
+}
+
+const htmlEscapes = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39",
+};
+
+/**
+ * Transforms the given string to a HTML-safe value.
+ */
+export function escapeHtml(string) {
+  return (string || "").replace(/[&<>"']/g, (char) => htmlEscapes[char]);
 }

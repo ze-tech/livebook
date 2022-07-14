@@ -14,17 +14,19 @@ config :logger, :console,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
-# Sets the default authentication mode to token
-config :livebook, :authentication_mode, :token
+# Add mime type to upload notebooks with `Phoenix.LiveView.Upload`
+config :mime, :types, %{
+  "text/plain" => ["livemd"]
+}
 
-# Sets the default runtime to ElixirStandalone.
-# This is the desired default most of the time,
-# but in some specific use cases you may want
-# to configure that to the Embedded or Mix runtime instead.
-# Also make sure the configured runtime has
-# a synchronous `init` function that takes the
-# configured arguments.
-config :livebook, :default_runtime, {Livebook.Runtime.ElixirStandalone, []}
+config :livebook,
+  app_service_name: nil,
+  app_service_url: nil,
+  authentication_mode: :token,
+  explore_notebooks: [],
+  plugs: [],
+  shutdown_enabled: false,
+  storage: Livebook.Storage.Ets
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

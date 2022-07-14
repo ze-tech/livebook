@@ -1,7 +1,7 @@
 defmodule LivebookWeb.HomeLive.ImportUrlComponent do
   use LivebookWeb, :live_component
 
-  alias Livebook.{ContentLoader, Utils}
+  alias Livebook.{Utils, Notebook}
 
   @impl true
   def mount(socket) do
@@ -9,30 +9,42 @@ defmodule LivebookWeb.HomeLive.ImportUrlComponent do
   end
 
   @impl true
+  def update(assigns, socket) do
+    if url = assigns[:url] do
+      {:ok, do_import(socket, url)}
+    else
+      {:ok, socket}
+    end
+  end
+
+  @impl true
   def render(assigns) do
-    ~L"""
+    ~H"""
     <div class="flex-col space-y-5">
       <%= if @error_message do %>
         <div class="error-box">
           <%= @error_message %>
         </div>
       <% end %>
-      <p class="text-gray-700">
+      <p class="text-gray-700" id="import-from-url">
         Paste the URL to a .livemd file, to a GitHub file, or to a Gist to import it.
       </p>
-      <%= f = form_for :data, "#",
-                phx_submit: "import",
-                phx_change: "validate",
-                phx_target: @myself,
-                autocomplete: "off" %>
+      <.form let={f} for={:data}
+        phx-submit="import"
+        phx-change="validate"
+        phx-target={@myself}
+        autocomplete="off">
         <%= text_input f, :url, value: @url, class: "input",
               placeholder: "Notebook URL",
               autofocus: true,
+              aria_labelledby: "import-from-url",
               spellcheck: "false" %>
-        <%= submit "Import",
-              class: "mt-5 button button-blue",
-              disabled: not Utils.valid_url?(@url) %>
-      </form>
+        <button class="mt-5 button-base button-blue"
+          type="submit"
+          disabled={not Utils.valid_url?(@url)}>
+          Import
+        </button>
+      </.form>
     </div>
     """
   end
@@ -43,16 +55,21 @@ defmodule LivebookWeb.HomeLive.ImportUrlComponent do
   end
 
   def handle_event("import", %{"data" => %{"url" => url}}, socket) do
-    url
-    |> ContentLoader.rewrite_url()
-    |> ContentLoader.fetch_content()
+    {:noreply, do_import(socket, url)}
+  end
+
+  defp do_import(socket, url) do
+    origin = Notebook.ContentLoader.url_to_location(url)
+
+    origin
+    |> Notebook.ContentLoader.fetch_content_from_location()
     |> case do
       {:ok, content} ->
-        send(self(), {:import_content, content})
-        {:noreply, socket}
+        send(self(), {:import_content, content, [origin: origin]})
+        socket
 
       {:error, message} ->
-        {:noreply, assign(socket, error_message: String.capitalize(message))}
+        assign(socket, url: url, error_message: Utils.upcase_first(message))
     end
   end
 end

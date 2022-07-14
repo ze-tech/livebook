@@ -7,14 +7,15 @@ defmodule Livebook.Runtime.MixStandaloneTest do
     # Start node initialization
     project_path = Path.expand("../../support/project", __DIR__)
     emitter = Livebook.Utils.Emitter.new(self())
-    Runtime.MixStandalone.init_async(project_path, emitter)
+    runtime = Runtime.MixStandalone.new(project_path)
+    Runtime.MixStandalone.connect_async(runtime, emitter)
 
     ref = emitter.ref
     # Wait for the Mix setup to finish and for node initialization
-    assert_receive {:emitter, ^ref, {:output, "Running mix deps.get...\n"}}, 8_000
-    assert_receive {:emitter, ^ref, {:ok, runtime}}, 8_000
+    assert_receive {:emitter, ^ref, {:output, "Running mix deps.get...\n"}}, 15_000
+    assert_receive {:emitter, ^ref, {:ok, runtime}}, 15_000
 
-    Runtime.connect(runtime)
+    Runtime.take_ownership(runtime)
     %{node: node} = runtime
 
     # Make sure the node is running.
@@ -28,13 +29,13 @@ defmodule Livebook.Runtime.MixStandaloneTest do
     # Ensure modules from the Mix project are available
     assert :rpc.call(node, Project, :hello, []) == "hello"
 
-    # Disconnecting should also terminate the node
+    # Stopping the runtime should also terminate the node
     Runtime.disconnect(runtime)
     assert_receive {:nodedown, ^node}
   end
 
   defp evaluator_module_loaded?(node) do
-    :rpc.call(node, :code, :is_loaded, [Livebook.Evaluator]) != false
+    :rpc.call(node, :code, :is_loaded, [Livebook.Runtime.Evaluator]) != false
   end
 
   defp manager_started?(node) do

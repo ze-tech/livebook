@@ -1,5 +1,5 @@
 defmodule Livebook.Runtime.MixStandalone do
-  defstruct [:node, :server_pid, :project_path]
+  defstruct [:node, :server_pid, :project_path, :flags]
 
   # A runtime backed by a standalone Elixir node managed by Livebook.
   #
@@ -12,36 +12,42 @@ defmodule Livebook.Runtime.MixStandalone do
   alias Livebook.Utils.Emitter
 
   @type t :: %__MODULE__{
-          node: node(),
-          server_pid: pid(),
-          project_path: String.t()
+          project_path: String.t(),
+          flags: String.t(),
+          node: node() | nil,
+          server_pid: pid() | nil
         }
 
   @doc """
-  Starts a new Elixir node (i.e. a system process) and initializes
-  it with Livebook-specific modules and processes.
-
-  The node is started together with a Mix environment appropriate
-  for the given `project_path`. The setup may involve
-  long-running steps (like fetching dependencies, compiling the project),
-  so the initialization is asynchronous. This function spawns and links
-  a process responsible for initialization, which then uses `emitter`
-  to emit the following notifications:
-
-  * `{:output, string}` - arbitrary output/info sent as the initialization proceeds
-  * `{:ok, runtime}` - a final message indicating successful initialization
-  * `{:error, message}` - a final message indicating failure
-
-  If no process calls `Runtime.connect/1` for a period of time,
-  the node automatically terminates. Whoever connects, becomes the owner
-  and as soon as it terminates, the node terminates as well.
-  The node may also be terminated manually by using `Runtime.disconnect/1`.
-
-  Note: to start the node it is required that both `elixir` and `mix` are
-  recognised executables within the system.
+  Returns a new runtime instance.
   """
-  @spec init_async(String.t(), Emitter.t()) :: :ok
-  def init_async(project_path, emitter) do
+  @spec new(String.t(), String.t()) :: t()
+  def new(project_path, flags \\ "") do
+    %__MODULE__{project_path: project_path, flags: flags}
+  end
+
+  @doc """
+  Starts a new Elixir node (a system process) and initializes it with
+  Livebook-specific modules and processes.
+
+  The node is started together with a Mix environment at the given
+  `project_path`. The setup may involve long-running steps (like
+  fetching dependencies, compiling the project), so the initialization
+  is asynchronous. This function spawns and links a process responsible
+  for initialization, which then uses `emitter` to emit the following
+  notifications:
+
+    * `{:output, string}` - arbitrary output/info sent as the initialization proceeds
+    * `{:ok, runtime}` - a final message indicating successful initialization
+    * `{:error, message}` - a final message indicating failure
+
+  Note: to start the node it is required that both `elixir` and `mix`
+  are recognised executables within the system.
+  """
+  @spec connect_async(t(), Emitter.t()) :: :ok
+  def connect_async(runtime, emitter) do
+    %{project_path: project_path} = runtime
+    flags = OptionParser.split(runtime.flags)
     output_emitter = Emitter.mapper(emitter, fn output -> {:output, output} end)
 
     spawn_link(fn ->
@@ -55,14 +61,10 @@ defmodule Livebook.Runtime.MixStandalone do
              :ok <- run_mix_task("deps.get", project_path, output_emitter),
              :ok <- run_mix_task("compile", project_path, output_emitter),
              eval = child_node_eval_string(),
-             port = start_elixir_mix_node(elixir_path, child_node, eval, argv, project_path),
-             {:ok, server_pid} <- parent_init_sequence(child_node, port, output_emitter) do
-          runtime = %__MODULE__{
-            node: child_node,
-            server_pid: server_pid,
-            project_path: project_path
-          }
-
+             port =
+               start_elixir_mix_node(elixir_path, child_node, flags, eval, argv, project_path),
+             {:ok, server_pid} <- parent_init_sequence(child_node, port, emitter: output_emitter) do
+          runtime = %{runtime | node: child_node, server_pid: server_pid}
           Emitter.emit(emitter, {:ok, runtime})
         else
           {:error, error} ->
@@ -75,17 +77,31 @@ defmodule Livebook.Runtime.MixStandalone do
   end
 
   @doc """
-  A synchronous version of of `init_async/2`.
+  A synchronous version of of `connect_async/2`.
   """
-  @spec init(String.t()) :: {:ok, t()} | {:error, String.t()}
-  def init(project_path) do
+  @spec connect(t()) :: {:ok, t()} | {:error, String.t()}
+  def connect(runtime) do
     %{ref: ref} = emitter = Livebook.Utils.Emitter.new(self())
 
-    init_async(project_path, emitter)
+    connect_async(runtime, emitter)
 
+    await_connect(ref, [])
+  end
+
+  defp await_connect(ref, outputs) do
     receive do
-      {:emitter, ^ref, {:ok, runtime}} -> {:ok, runtime}
-      {:emitter, ^ref, {:error, error}} -> {:error, error}
+      {:emitter, ^ref, message} -> message
+    end
+    |> case do
+      {:ok, runtime} ->
+        {:ok, runtime}
+
+      {:error, error} ->
+        message = IO.iodata_to_binary([error, ". Output:\n\n", Enum.reverse(outputs)])
+        {:error, message}
+
+      {:output, output} ->
+        await_connect(ref, [output | outputs])
     end
   end
 
@@ -98,13 +114,14 @@ defmodule Livebook.Runtime.MixStandalone do
            into: output_emitter
          ) do
       {_callback, 0} -> :ok
-      {_callback, _status} -> {:error, "running mix #{task} failed, see output for more details"}
+      {_callback, _status} -> {:error, "running mix #{task} failed"}
     end
   end
 
-  defp start_elixir_mix_node(elixir_path, node_name, eval, argv, project_path) do
+  defp start_elixir_mix_node(elixir_path, node_name, flags, eval, argv, project_path) do
     # Here we create a port to start the system process in a non-blocking way.
     Port.open({:spawn_executable, elixir_path}, [
+      :binary,
       # We don't communicate with the system process via stdio,
       # contrarily, we want any non-captured output to go directly
       # to the terminal
@@ -113,61 +130,86 @@ defmodule Livebook.Runtime.MixStandalone do
       cd: project_path,
       args:
         elixir_flags(node_name) ++
-          ["-S", "mix", "run", "--eval", eval, "--" | Enum.map(argv, &to_string/1)]
+          ["-S", "mix", "run", "--eval", eval | flags] ++
+          ["--" | Enum.map(argv, &to_string/1)]
     ])
   end
 end
 
 defimpl Livebook.Runtime, for: Livebook.Runtime.MixStandalone do
-  alias Livebook.Runtime.ErlDist
+  alias Livebook.Runtime.ErlDist.RuntimeServer
+
+  def describe(runtime) do
+    [
+      {"Type", "Mix standalone"},
+      {"Project", runtime.project_path},
+      runtime.flags != "" && {"Flags", runtime.flags},
+      connected?(runtime) && {"Node name", Atom.to_string(runtime.node)}
+    ]
+    |> Enum.filter(&is_tuple/1)
+  end
 
   def connect(runtime) do
-    ErlDist.RuntimeServer.set_owner(runtime.server_pid, self())
+    Livebook.Runtime.MixStandalone.connect(runtime)
+  end
+
+  def connected?(runtime) do
+    runtime.server_pid != nil
+  end
+
+  def take_ownership(runtime, opts \\ []) do
+    RuntimeServer.attach(runtime.server_pid, self(), opts)
     Process.monitor(runtime.server_pid)
   end
 
   def disconnect(runtime) do
-    ErlDist.RuntimeServer.stop(runtime.server_pid)
-  end
-
-  def evaluate_code(
-        runtime,
-        code,
-        container_ref,
-        evaluation_ref,
-        prev_evaluation_ref,
-        opts \\ []
-      ) do
-    ErlDist.RuntimeServer.evaluate_code(
-      runtime.server_pid,
-      code,
-      container_ref,
-      evaluation_ref,
-      prev_evaluation_ref,
-      opts
-    )
-  end
-
-  def forget_evaluation(runtime, container_ref, evaluation_ref) do
-    ErlDist.RuntimeServer.forget_evaluation(runtime.server_pid, container_ref, evaluation_ref)
-  end
-
-  def drop_container(runtime, container_ref) do
-    ErlDist.RuntimeServer.drop_container(runtime.server_pid, container_ref)
-  end
-
-  def request_completion_items(runtime, send_to, ref, hint, container_ref, evaluation_ref) do
-    ErlDist.RuntimeServer.request_completion_items(
-      runtime.server_pid,
-      send_to,
-      ref,
-      hint,
-      container_ref,
-      evaluation_ref
-    )
+    :ok = RuntimeServer.stop(runtime.server_pid)
+    {:ok, %{runtime | node: nil, server_pid: nil}}
   end
 
   def duplicate(runtime) do
-    Livebook.Runtime.MixStandalone.init(runtime.project_path)
+    Livebook.Runtime.MixStandalone.new(runtime.project_path, runtime.flags)
+  end
+
+  def evaluate_code(runtime, code, locator, base_locator, opts \\ []) do
+    RuntimeServer.evaluate_code(runtime.server_pid, code, locator, base_locator, opts)
+  end
+
+  def forget_evaluation(runtime, locator) do
+    RuntimeServer.forget_evaluation(runtime.server_pid, locator)
+  end
+
+  def drop_container(runtime, container_ref) do
+    RuntimeServer.drop_container(runtime.server_pid, container_ref)
+  end
+
+  def handle_intellisense(runtime, send_to, request, base_locator) do
+    RuntimeServer.handle_intellisense(runtime.server_pid, send_to, request, base_locator)
+  end
+
+  def read_file(runtime, path) do
+    RuntimeServer.read_file(runtime.server_pid, path)
+  end
+
+  def start_smart_cell(runtime, kind, ref, attrs, base_locator) do
+    RuntimeServer.start_smart_cell(runtime.server_pid, kind, ref, attrs, base_locator)
+  end
+
+  def set_smart_cell_base_locator(runtime, ref, base_locator) do
+    RuntimeServer.set_smart_cell_base_locator(runtime.server_pid, ref, base_locator)
+  end
+
+  def stop_smart_cell(runtime, ref) do
+    RuntimeServer.stop_smart_cell(runtime.server_pid, ref)
+  end
+
+  def fixed_dependencies?(_runtime), do: true
+
+  def add_dependencies(_runtime, _code, _dependencies) do
+    raise "not supported"
+  end
+
+  def search_packages(_runtime, _send_to, _search) do
+    raise "not supported"
   end
 end

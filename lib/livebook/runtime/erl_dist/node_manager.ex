@@ -34,6 +34,14 @@ defmodule Livebook.Runtime.ErlDist.NodeManager do
       In most cases we enforce a single manager per node
       and identify it by a name, but this can be opted-out
       from by using this option. Defaults to `false`.
+
+    * `:auto_termination` - whether to terminate the manager
+      when the last runtime server terminates. Defaults to `true`.
+
+    * `:parent_node` - indicates which node spawned the node manager.
+       It is used to disconnect the node when the server terminates,
+       which happens when the last session using the node disconnects.
+       Defaults to `nil`
   """
   def start(opts \\ []) do
     {opts, gen_opts} = split_opts(opts)
@@ -63,9 +71,9 @@ defmodule Livebook.Runtime.ErlDist.NodeManager do
   @doc """
   Starts a new `Livebook.Runtime.ErlDist.RuntimeServer` for evaluation.
   """
-  @spec start_runtime_server(node() | pid()) :: pid()
-  def start_runtime_server(node_or_pid) do
-    GenServer.call(server(node_or_pid), :start_runtime_server)
+  @spec start_runtime_server(node() | pid(), keyword()) :: pid()
+  def start_runtime_server(node_or_pid, opts \\ []) do
+    GenServer.call(server(node_or_pid), {:start_runtime_server, opts})
   end
 
   defp server(pid) when is_pid(pid), do: pid
@@ -74,6 +82,8 @@ defmodule Livebook.Runtime.ErlDist.NodeManager do
   @impl true
   def init(opts) do
     unload_modules_on_termination = Keyword.get(opts, :unload_modules_on_termination, true)
+    auto_termination = Keyword.get(opts, :auto_termination, true)
+    parent_node = Keyword.get(opts, :parent_node)
 
     ## Initialize the node
 
@@ -97,10 +107,12 @@ defmodule Livebook.Runtime.ErlDist.NodeManager do
     {:ok,
      %{
        unload_modules_on_termination: unload_modules_on_termination,
+       auto_termination: auto_termination,
        server_supevisor: server_supevisor,
        runtime_servers: [],
        initial_ignore_module_conflict: initial_ignore_module_conflict,
-       original_standard_error: original_standard_error
+       original_standard_error: original_standard_error,
+       parent_node: parent_node
      }}
   end
 
@@ -117,6 +129,10 @@ defmodule Livebook.Runtime.ErlDist.NodeManager do
       ErlDist.unload_required_modules()
     end
 
+    if state.parent_node do
+      Node.disconnect(state.parent_node)
+    end
+
     :ok
   end
 
@@ -124,20 +140,28 @@ defmodule Livebook.Runtime.ErlDist.NodeManager do
   def handle_info({:DOWN, _, :process, pid, _}, state) do
     if pid in state.runtime_servers do
       case update_in(state.runtime_servers, &List.delete(&1, pid)) do
-        %{runtime_servers: []} = state -> {:stop, :normal, state}
-        state -> {:noreply, state}
+        %{runtime_servers: [], auto_termination: true} = state ->
+          {:stop, :shutdown, state}
+
+        state ->
+          {:noreply, state}
       end
     else
       {:noreply, state}
     end
   end
 
+  def handle_info({:orphan_log, _output} = message, state) do
+    for pid <- state.runtime_servers, do: send(pid, message)
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def handle_call(:start_runtime_server, _from, state) do
+  def handle_call({:start_runtime_server, opts}, _from, state) do
     {:ok, server_pid} =
-      DynamicSupervisor.start_child(state.server_supevisor, ErlDist.RuntimeServer)
+      DynamicSupervisor.start_child(state.server_supevisor, {ErlDist.RuntimeServer, opts})
 
     Process.monitor(server_pid)
     state = update_in(state.runtime_servers, &[server_pid | &1])

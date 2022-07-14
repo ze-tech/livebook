@@ -8,35 +8,34 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{"author" => "Sherlock Holmes"},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{"created_at" => "2021-02-15"},
               cells: [
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{"updated_at" => "2021-02-15"},
-                    source: """
+                  | source: """
                     Make sure to install:
 
                     * Erlang
                     * Elixir
-                    * PostgreSQL\
+                    * PostgreSQL
+
+                    $x_{i} + y_{i}$\
                     """
                 },
                 %{
-                  Notebook.Cell.new(:elixir)
-                  | metadata: %{"readonly" => true},
+                  Notebook.Cell.new(:code)
+                  | disable_formatting: true,
+                    reevaluate_automatically: true,
                     source: """
                     Enum.to_list(1..10)\
                     """
                 },
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{},
-                    source: """
+                  | source: """
                     This is it for this section.\
                     """
                 }
@@ -44,22 +43,35 @@ defmodule Livebook.LiveMarkdown.ExportTest do
           },
           %{
             Notebook.Section.new()
-            | name: "Section 2",
-              metadata: %{},
+            | id: "s2",
+              name: "Section 2",
               cells: [
                 %{
-                  Notebook.Cell.new(:input)
-                  | type: :text,
-                    name: "length",
-                    value: "100",
-                    reactive: true
+                  Notebook.Cell.new(:code)
+                  | source: """
+                    IO.gets("length: ")\
+                    """
+                }
+              ]
+          },
+          %{
+            Notebook.Section.new()
+            | name: "Section 3",
+              parent_id: "s2",
+              cells: [
+                %{
+                  Notebook.Cell.new(:code)
+                  | source: """
+                    Process.info()\
+                    """
                 },
                 %{
-                  Notebook.Cell.new(:elixir)
-                  | metadata: %{},
-                    source: """
-                    IO.gets("length: ")
-                    """
+                  Notebook.Cell.new(:smart)
+                  | source: """
+                    IO.puts("My text")\
+                    """,
+                    attrs: %{"text" => "My text"},
+                    kind: "text"
                 }
               ]
           }
@@ -67,15 +79,9 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     }
 
     expected_document = """
-    <!-- livebook:{"author":"Sherlock Holmes"} -->
-
     # My Notebook
 
-    <!-- livebook:{"created_at":"2021-02-15"} -->
-
     ## Section 1
-
-    <!-- livebook:{"updated_at":"2021-02-15"} -->
 
     Make sure to install:
 
@@ -83,7 +89,9 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     * Elixir
     * PostgreSQL
 
-    <!-- livebook:{"readonly":true} -->
+    $x_{i} + y_{i}$
+
+    <!-- livebook:{"disable_formatting":true,"reevaluate_automatically":true} -->
 
     ```elixir
     Enum.to_list(1..10)
@@ -93,14 +101,26 @@ defmodule Livebook.LiveMarkdown.ExportTest do
 
     ## Section 2
 
-    <!-- livebook:{"livebook_object":"cell_input","name":"length","reactive":true,"type":"text","value":"100"} -->
-
     ```elixir
     IO.gets("length: ")
     ```
+
+    <!-- livebook:{"branch_parent_index":1} -->
+
+    ## Section 3
+
+    ```elixir
+    Process.info()
+    ```
+
+    <!-- livebook:{"attrs":{"text":"My text"},"kind":"text","livebook_object":"smart_cell"} -->
+
+    ```elixir
+    IO.puts("My text")
+    ```
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
@@ -109,17 +129,14 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{},
-                    source: """
+                  | source: """
                     |State|Abbrev|Capital|
                     | --: | :-: | --- |
                     | Texas | TX | Austin |
@@ -142,7 +159,7 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     | Maine | ME     | Augusta |
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
@@ -151,17 +168,14 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{},
-                    source: """
+                  | source: """
                     # Heading 1
 
                     ## Heading 2
@@ -182,7 +196,7 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     ### Heading 3
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
@@ -191,17 +205,14 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{},
-                    source: """
+                  | source: """
                     ```shell
                     mix deps.get
                     ```
@@ -230,7 +241,7 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     ```
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
@@ -239,17 +250,14 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{},
-                    source: """
+                  | source: """
                     ```elixir
                     [1, 2, 3]
                     ```\
@@ -260,12 +268,10 @@ defmodule Livebook.LiveMarkdown.ExportTest do
           %{
             Notebook.Section.new()
             | name: "Section 2",
-              metadata: %{},
               cells: [
                 %{
                   Notebook.Cell.new(:markdown)
-                  | metadata: %{},
-                    source: """
+                  | source: """
                     Some markdown.
 
                     ```elixir
@@ -300,26 +306,23 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     ```
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
 
-  test "formats code in Elixir cells" do
+  test "formats code in code cells" do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
-                  Notebook.Cell.new(:elixir)
-                  | metadata: %{},
-                    source: """
+                  Notebook.Cell.new(:code)
+                  | source: """
                     [1,2,3] # Comment
                     """
                 }
@@ -339,25 +342,23 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     ```
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
 
-  test "does not format code in Elixir cells which explicitly state so in metadata" do
+  test "does not format code in code cells which have formatting disabled" do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
-                  Notebook.Cell.new(:elixir)
-                  | metadata: %{"disable_formatting" => true},
+                  Notebook.Cell.new(:code)
+                  | disable_formatting: true,
                     source: """
                     [1,2,3] # Comment\
                     """
@@ -379,27 +380,33 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     ```
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
   end
 
-  test "save password as empty string" do
+  test "handles backticks in code cell" do
     notebook = %{
       Notebook.new()
       | name: "My Notebook",
-        metadata: %{},
         sections: [
           %{
             Notebook.Section.new()
             | name: "Section 1",
-              metadata: %{},
               cells: [
                 %{
-                  Notebook.Cell.new(:input)
-                  | type: :password,
-                    name: "pass",
-                    value: "0123456789"
+                  Notebook.Cell.new(:code)
+                  | source: """
+                    \"\"\"
+                    ```elixir
+                    x = 1
+                    ```
+
+                    ````markdown
+                    # Heading
+                    ````
+                    \"\"\"\
+                    """
                 }
               ]
           }
@@ -411,11 +418,619 @@ defmodule Livebook.LiveMarkdown.ExportTest do
 
     ## Section 1
 
-    <!-- livebook:{"livebook_object":"cell_input","name":"pass","type":"password","value":""} -->
+    `````elixir
+    \"\"\"
+    ```elixir
+    x = 1
+    ```
+
+    ````markdown
+    # Heading
+    ````
+    \"\"\"
+    `````
     """
 
-    document = Export.notebook_to_markdown(notebook)
+    document = Export.notebook_to_livemd(notebook)
 
     assert expected_document == document
+  end
+
+  test "separates consecutive markdown cells by a break annotation" do
+    notebook = %{
+      Notebook.new()
+      | name: "My Notebook",
+        sections: [
+          %{
+            Notebook.Section.new()
+            | name: "Section 1",
+              cells: [
+                %{
+                  Notebook.Cell.new(:markdown)
+                  | source: """
+                    Cell 1\
+                    """
+                },
+                %{
+                  Notebook.Cell.new(:markdown)
+                  | source: """
+                    Cell 2\
+                    """
+                }
+              ]
+          }
+        ]
+    }
+
+    expected_document = """
+    # My Notebook
+
+    ## Section 1
+
+    Cell 1
+
+    <!-- livebook:{"break_markdown":true} -->
+
+    Cell 2
+    """
+
+    document = Export.notebook_to_livemd(notebook)
+
+    assert expected_document == document
+  end
+
+  test "exports leading notebook comments" do
+    notebook = %{
+      Notebook.new()
+      | name: "My Notebook",
+        persist_outputs: true,
+        leading_comments: [
+          ["vim: set syntax=markdown:"],
+          ["nowhitespace"],
+          ["  Multi", "  line"]
+        ],
+        sections: [
+          %{
+            Notebook.Section.new()
+            | name: "Section 1",
+              cells: [
+                %{
+                  Notebook.Cell.new(:markdown)
+                  | source: """
+                    Cell 1\
+                    """
+                }
+              ]
+          }
+        ]
+    }
+
+    expected_document = """
+    <!-- vim: set syntax=markdown: -->
+
+    <!-- nowhitespace -->
+
+    <!--
+      Multi
+      line
+    -->
+
+    <!-- livebook:{"persist_outputs":true} -->
+
+    # My Notebook
+
+    ## Section 1
+
+    Cell 1
+    """
+
+    document = Export.notebook_to_livemd(notebook)
+
+    assert expected_document == document
+  end
+
+  describe "outputs" do
+    test "does not include outputs by default" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: """
+                      IO.puts("hey")\
+                      """,
+                      outputs: [
+                        {0, {:stdout, "hey"}}
+                      ]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      IO.puts("hey")
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook)
+
+      assert expected_document == document
+    end
+
+    test "includes outputs when :include_outputs option is set" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: """
+                      IO.puts("hey")\
+                      """,
+                      outputs: [{0, {:stdout, "hey"}}]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      IO.puts("hey")
+      ```
+
+      <!-- livebook:{"output":true} -->
+
+      ```
+      hey
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+
+    test "removes ANSI escape codes from the output text" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: """
+                      IO.puts("hey")\
+                      """,
+                      outputs: [{0, {:text, "\e[34m:ok\e[0m"}}, {1, {:stdout, "hey"}}]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      IO.puts("hey")
+      ```
+
+      <!-- livebook:{"output":true} -->
+
+      ```
+      hey
+      ```
+
+      <!-- livebook:{"output":true} -->
+
+      ```
+      :ok
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+
+    test "ignores non-textual output types" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: """
+                      IO.puts("hey")\
+                      """,
+                      outputs: [{0, {:markdown, "some **Markdown**"}}]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      IO.puts("hey")
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+
+    test "does not include js output with no export info" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: ":ok",
+                      outputs: [
+                        {0,
+                         {:js,
+                          %{
+                            js_view: %{
+                              ref: "1",
+                              pid: spawn_widget_with_data("1", "data"),
+                              assets: %{archive_path: "", hash: "abcd", js_path: "main.js"}
+                            },
+                            export: nil
+                          }}}
+                      ]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      :ok
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+
+    test "includes js output if export info is set" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: ":ok",
+                      outputs: [
+                        {0,
+                         {:js,
+                          %{
+                            js_view: %{
+                              ref: "1",
+                              pid: spawn_widget_with_data("1", "graph TD;\nA-->B;"),
+                              assets: %{archive_path: "", hash: "abcd", js_path: "main.js"}
+                            },
+                            export: %{info_string: "mermaid", key: nil}
+                          }}}
+                      ]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      :ok
+      ```
+
+      <!-- livebook:{"output":true} -->
+
+      ```mermaid
+      graph TD;
+      A-->B;
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+
+    test "serializes js output data to JSON if not binary" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: ":ok",
+                      outputs: [
+                        {0,
+                         {:js,
+                          %{
+                            js_view: %{
+                              ref: "1",
+                              pid: spawn_widget_with_data("1", %{height: 50, width: 50}),
+                              assets: %{archive_path: "", hash: "abcd", js_path: "main.js"}
+                            },
+                            export: %{info_string: "box", key: nil}
+                          }}}
+                      ]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      :ok
+      ```
+
+      <!-- livebook:{"output":true} -->
+
+      ```box
+      {"height":50,"width":50}
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+
+    test "exports partial js output data when export_key is set" do
+      notebook = %{
+        Notebook.new()
+        | name: "My Notebook",
+          sections: [
+            %{
+              Notebook.Section.new()
+              | name: "Section 1",
+                cells: [
+                  %{
+                    Notebook.Cell.new(:code)
+                    | source: ":ok",
+                      outputs: [
+                        {0,
+                         {:js,
+                          %{
+                            js_view: %{
+                              ref: "1",
+                              pid:
+                                spawn_widget_with_data("1", %{
+                                  spec: %{"height" => 50, "width" => 50},
+                                  datasets: []
+                                }),
+                              assets: %{archive_path: "", hash: "abcd", js_path: "main.js"}
+                            },
+                            export: %{info_string: "vega-lite", key: :spec}
+                          }}}
+                      ]
+                  }
+                ]
+            }
+          ]
+      }
+
+      expected_document = """
+      # My Notebook
+
+      ## Section 1
+
+      ```elixir
+      :ok
+      ```
+
+      <!-- livebook:{"output":true} -->
+
+      ```vega-lite
+      {"height":50,"width":50}
+      ```
+      """
+
+      document = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+      assert expected_document == document
+    end
+  end
+
+  test "includes outputs when notebook has :persist_outputs set" do
+    notebook = %{
+      Notebook.new()
+      | name: "My Notebook",
+        persist_outputs: true,
+        sections: [
+          %{
+            Notebook.Section.new()
+            | name: "Section 1",
+              cells: [
+                %{
+                  Notebook.Cell.new(:code)
+                  | source: """
+                    IO.puts("hey")\
+                    """,
+                    outputs: [{0, {:stdout, "hey"}}]
+                }
+              ]
+          }
+        ]
+    }
+
+    expected_document = """
+    <!-- livebook:{"persist_outputs":true} -->
+
+    # My Notebook
+
+    ## Section 1
+
+    ```elixir
+    IO.puts("hey")
+    ```
+
+    <!-- livebook:{"output":true} -->
+
+    ```
+    hey
+    ```
+    """
+
+    document = Export.notebook_to_livemd(notebook)
+
+    assert expected_document == document
+  end
+
+  test "the :include_outputs option takes precedence over notebook's :persist_outputs" do
+    notebook = %{
+      Notebook.new()
+      | name: "My Notebook",
+        persist_outputs: true,
+        sections: [
+          %{
+            Notebook.Section.new()
+            | name: "Section 1",
+              cells: [
+                %{
+                  Notebook.Cell.new(:code)
+                  | source: """
+                    IO.puts("hey")\
+                    """,
+                    outputs: [{0, {:stdout, "hey"}}]
+                }
+              ]
+          }
+        ]
+    }
+
+    expected_document = """
+    <!-- livebook:{"persist_outputs":true} -->
+
+    # My Notebook
+
+    ## Section 1
+
+    ```elixir
+    IO.puts("hey")
+    ```
+    """
+
+    document = Export.notebook_to_livemd(notebook, include_outputs: false)
+
+    assert expected_document == document
+  end
+
+  test "persists :autosave_interval_s when other than default" do
+    notebook = %{
+      Notebook.new()
+      | name: "My Notebook",
+        autosave_interval_s: 10
+    }
+
+    expected_document = """
+    <!-- livebook:{"autosave_interval_s":10} -->
+
+    # My Notebook
+    """
+
+    document = Export.notebook_to_livemd(notebook)
+
+    assert expected_document == document
+  end
+
+  describe "setup cell" do
+    test "includes the leading setup cell when it has content" do
+      notebook =
+        %{
+          Notebook.new()
+          | name: "My Notebook",
+            sections: [%{Notebook.Section.new() | name: "Section 1"}]
+        }
+        |> Notebook.put_setup_cell(%{Notebook.Cell.new(:code) | source: "Mix.install([...])"})
+
+      expected_document = """
+      # My Notebook
+
+      ```elixir
+      Mix.install([...])
+      ```
+
+      ## Section 1
+      """
+
+      document = Export.notebook_to_livemd(notebook)
+
+      assert expected_document == document
+    end
+  end
+
+  defp spawn_widget_with_data(ref, data) do
+    spawn(fn ->
+      receive do
+        {:connect, pid, %{ref: ^ref}} -> send(pid, {:connect_reply, data, %{ref: ref}})
+      end
+    end)
   end
 end

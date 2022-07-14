@@ -1,52 +1,38 @@
 defmodule LivebookWeb.ExploreLive do
   use LivebookWeb, :live_view
 
-  import LivebookWeb.UserHelpers
   import LivebookWeb.SessionHelpers
+  import LivebookWeb.UserHelpers
 
+  alias LivebookWeb.{SidebarHelpers, ExploreHelpers, PageHelpers}
   alias Livebook.Notebook.Explore
 
   @impl true
-  def mount(_params, %{"current_user_id" => current_user_id} = session, socket) do
-    if connected?(socket) do
-      Phoenix.PubSub.subscribe(Livebook.PubSub, "users:#{current_user_id}")
-    end
-
-    current_user = build_current_user(session, socket)
-
-    [lead_notebook_info | notebook_infos] = Explore.notebook_infos()
+  def mount(_params, _session, socket) do
+    [lead_notebook_info | notebook_infos] = Explore.visible_notebook_infos()
 
     {:ok,
-     assign(socket,
-       current_user: current_user,
+     socket
+     |> SidebarHelpers.shared_home_handlers()
+     |> assign(
        lead_notebook_info: lead_notebook_info,
-       notebook_infos: notebook_infos
+       notebook_infos: notebook_infos,
+       page_title: "Livebook - Explore"
      )}
   end
 
   @impl true
   def render(assigns) do
-    ~L"""
-    <div class="flex flex-grow h-full">
-      <%= live_component LivebookWeb.SidebarComponent,
-            id: :sidebar,
-            items: [
-              %{type: :logo},
-              %{type: :break},
-              %{type: :user, current_user: @current_user, path: Routes.explore_path(@socket, :user)}
-            ] %>
-      <div class="flex-grow px-6 py-8 overflow-y-auto">
+    ~H"""
+    <div class="flex grow h-full">
+      <SidebarHelpers.sidebar>
+        <SidebarHelpers.logo_item socket={@socket} />
+        <SidebarHelpers.shared_home_footer socket={@socket} current_user={@current_user} />
+      </SidebarHelpers.sidebar>
+      <div class="grow px-6 py-8 overflow-y-auto">
         <div class="max-w-screen-md w-full mx-auto px-4 pb-8 space-y-8">
           <div>
-            <div class="relative">
-              <%= live_patch to: Routes.home_path(@socket, :page),
-                    class: "hidden md:block absolute top-[50%] left-[-12px] transform -translate-y-1/2 -translate-x-full" do %>
-                <%= remix_icon("arrow-left-line", class: "text-2xl align-middle") %>
-              <% end %>
-              <h1 class="text-3xl text-gray-800 font-semibold">
-                Explore
-              </h1>
-            </div>
+            <PageHelpers.title text="Explore" socket={@socket} />
             <p class="mt-4 text-gray-700">
               Check out a number of examples showcasing various parts of the Elixir ecosystem.
               Click on any notebook you like and start playing around with it!
@@ -58,35 +44,73 @@ defmodule LivebookWeb.ExploreLive do
                 <%= @lead_notebook_info.title %>
               </h3>
               <p class="mt-2 text-sm text-gray-300">
-                <%= @lead_notebook_info.description %>
+                <%= @lead_notebook_info.details.description %>
               </p>
               <div class="mt-4">
-                <%= live_patch "Let's go", to: Routes.explore_path(@socket, :notebook, @lead_notebook_info.slug),
-                      class: "button button-blue" %>
+                <%= live_patch "Let's go",
+                      to: Routes.explore_path(@socket, :notebook, @lead_notebook_info.slug),
+                      class: "button-base button-blue" %>
               </div>
             </div>
-            <div class="flex-grow hidden md:flex flex items-center justify-center">
-              <img src="<%= @lead_notebook_info.image_url %>" height="120" width="120" alt="livebook" />
+            <div class="grow hidden md:flex flex items-center justify-center">
+              <img src={@lead_notebook_info.details.cover_url} height="120" width="120" alt="livebook" />
             </div>
           </div>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <%= for {info, idx} <- Enum.with_index(@notebook_infos) do %>
-              <%= live_component LivebookWeb.NotebookCardComponent,
-                    id: "notebook-card-#{idx}",
-                    notebook_info: info %>
+            <%# Note: it's fine to use stateless components in this comprehension,
+                because @notebook_infos never change %>
+            <%= for info <- @notebook_infos do %>
+              <ExploreHelpers.notebook_card notebook_info={info} socket={@socket} />
             <% end %>
           </div>
+          <%= for group_info <- Explore.group_infos() do %>
+            <.notebook_group group_info={group_info} socket={@socket} />
+          <% end %>
         </div>
       </div>
     </div>
 
-    <%= if @live_action == :user do %>
-      <%= live_modal LivebookWeb.UserComponent,
-            id: :user_modal,
-            modal_class: "w-full max-w-sm",
-            user: @current_user,
-            return_to: Routes.explore_path(@socket, :page) %>
-    <% end %>
+    <.current_user_modal current_user={@current_user} />
+    """
+  end
+
+  defp notebook_group(assigns) do
+    ~H"""
+    <div>
+      <div class="p-8 rounded-2xl border border-gray-300 flex space-x-8 items-center">
+        <img src={@group_info.cover_url} width="100" />
+        <div>
+          <div class="inline-flex px-2 py-0.5 bg-gray-200 rounded-3xl text-gray-700 text-xs font-medium">
+            <%= length(@group_info.notebook_infos) %> notebooks
+          </div>
+          <h3 class="mt-1 text-xl text-gray-800 font-semibold">
+            <%= @group_info.title %>
+          </h3>
+          <p class="mt-2 text-gray-700">
+            <%= @group_info.description %>
+          </p>
+        </div>
+      </div>
+      <div class="mt-4">
+        <ul>
+          <%= for {notebook_info, number} <- Enum.with_index(@group_info.notebook_infos, 1) do %>
+            <li class="py-4 flex items-center space-x-5 border-b border-gray-200 last:border-b-0">
+              <div class="text-lg text-gray-400 font-semibold">
+                <%= number |> Integer.to_string() |> String.pad_leading(2, "0") %>
+              </div>
+              <div class="grow text-gray-800 font-semibold">
+                <%= notebook_info.title %>
+              </div>
+              <%= live_redirect to: Routes.explore_path(@socket, :notebook, notebook_info.slug),
+                    class: "button-base button-outlined-gray" do %>
+                <.remix_icon icon="play-circle-line" class="align-middle mr-1" />
+                Open notebook
+              <% end %>
+            </li>
+          <% end %>
+        </ul>
+      </div>
+    </div>
     """
   end
 
@@ -101,12 +125,4 @@ defmodule LivebookWeb.ExploreLive do
   end
 
   def handle_params(_params, _url, socket), do: {:noreply, socket}
-
-  @impl true
-  def handle_info(
-        {:user_change, %{id: id} = user},
-        %{assigns: %{current_user: %{id: id}}} = socket
-      ) do
-    {:noreply, assign(socket, :current_user, user)}
-  end
 end

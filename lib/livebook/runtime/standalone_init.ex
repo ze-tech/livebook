@@ -38,10 +38,11 @@ defmodule Livebook.Runtime.StandaloneInit do
       "--erl",
       # Minimize schedulers busy wait threshold,
       # so that they go to sleep immediately after evaluation.
+      # Increase the default stack for dirty io threads (cuda requires it).
       # Enable ANSI escape codes as we handle them with HTML.
       # Disable stdin, so that the system process never tries to read
       # any input from the terminal.
-      "+sbwt none +sbwtdcpu none +sbwtdio none -elixir ansi_enabled true -noinput",
+      "+sbwt none +sbwtdcpu none +sbwtdio none +sssdio 128 -elixir ansi_enabled true -noinput",
       # Make the node hidden, so it doesn't automatically join the cluster
       "--hidden",
       # Use the cookie in Livebook
@@ -79,18 +80,25 @@ defmodule Livebook.Runtime.StandaloneInit do
   Performs the parent side of the initialization contract.
 
   Should be called by the initializing process on the parent node.
+
+  ## Options
+
+    * `:emitter` - an emitter through which all child outpt is passed
+
+    * `:init_opts` - see `Livebook.Runtime.ErlDist.initialize/2`
   """
-  @spec parent_init_sequence(node(), port(), Emitter.t() | nil) ::
-          {:ok, pid()} | {:error, String.t()}
-  def parent_init_sequence(child_node, port, emitter \\ nil) do
+  @spec parent_init_sequence(node(), port(), keyword()) :: {:ok, pid()} | {:error, String.t()}
+  def parent_init_sequence(child_node, port, opts \\ []) do
     port_ref = Port.monitor(port)
+
+    emitter = opts[:emitter]
 
     loop = fn loop ->
       receive do
         {:node_started, init_ref, ^child_node, primary_pid} ->
           Port.demonitor(port_ref)
 
-          server_pid = Livebook.Runtime.ErlDist.initialize(child_node)
+          server_pid = Livebook.Runtime.ErlDist.initialize(child_node, opts[:init_opts] || [])
 
           send(primary_pid, {:node_initialized, init_ref})
 
@@ -102,9 +110,11 @@ defmodule Livebook.Runtime.StandaloneInit do
           loop.(loop)
 
         {:DOWN, ^port_ref, :port, _object, _reason} ->
-          {:error, "Elixir process terminated unexpectedly"}
+          {:error, "Elixir terminated unexpectedly, please check the terminal for errors"}
       after
-        10_000 ->
+        # Use a longer timeout to account for longer child node startup,
+        # as may happen when starting with Mix.
+        40_000 ->
           {:error, "connection timed out"}
       end
     end

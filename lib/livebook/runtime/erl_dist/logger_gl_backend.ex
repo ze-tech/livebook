@@ -6,9 +6,9 @@ defmodule Livebook.Runtime.ErlDist.LoggerGLBackend do
   #
   # The backend is based on `Logger.Backends.Console`,
   # but instead of logging to the console, it sends
-  # log output to the group leader of the soruce process,
+  # log output to the group leader of the source process,
   # provided the group leader is an instance of
-  # `Livebook.Evaluator.IOProxy`.
+  # `Livebook.Runtime.Evaluator.IOProxy`.
   #
   # Basic configuration is taken from the console
   # logger configuration to match its formatting.
@@ -94,28 +94,21 @@ defmodule Livebook.Runtime.ErlDist.LoggerGLBackend do
   end
 
   defp log_event(level, msg, ts, md, gl, state) do
+    output = format_event(level, msg, ts, md, state)
+
     if io_proxy?(gl) do
-      output = format_event(level, msg, ts, md, state)
       async_io(gl, output)
+    else
+      send(Livebook.Runtime.ErlDist.NodeManager, {:orphan_log, output})
     end
   end
 
   defp io_proxy?(pid) do
     info = Process.info(pid, [:dictionary])
-    info[:dictionary][:"$initial_call"] == {Livebook.Evaluator.IOProxy, :init, 1}
+    info[:dictionary][:"$initial_call"] == {Livebook.Runtime.Evaluator.IOProxy, :init, 1}
   end
 
-  defp async_io(name, output) when is_atom(name) do
-    case Process.whereis(name) do
-      device when is_pid(device) ->
-        async_io(device, output)
-
-      nil ->
-        raise "no device registered with the name #{inspect(name)}"
-    end
-  end
-
-  defp async_io(device, output) when is_pid(device) do
+  def async_io(device, output) when is_pid(device) do
     send(device, {:io_request, self(), make_ref(), {:put_chars, :unicode, output}})
   end
 
