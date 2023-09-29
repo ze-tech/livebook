@@ -11,6 +11,11 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      unique_id:
+        description: 'A unique ID provided to identify this workflow'
+        required: false
+        type: string
 
 permissions:
   contents: read
