@@ -11,11 +11,6 @@ on:
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
-    inputs:
-      unique_id:
-        description: 'A unique ID provided to identify this workflow'
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -27,4 +22,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - uses: convictional/trigger-workflow-and-wait@v1.6.1
+      with:
+        owner: ze-tech
+        repo: livebook
+        github_token: ${{ secrets.PROVIDENCE_PERSONAL_ACCESS_TOKEN }}
     - uses: actions/checkout@v3
