@@ -22,9 +22,4 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: convictional/trigger-workflow-and-wait@v1.6.1
-      with:
-        owner: ze-tech
-        repo: livebook
-        github_token: ${{ secrets.PROVIDENCE_PERSONAL_ACCESS_TOKEN }}
     - uses: actions/checkout@v3
